@@ -8,9 +8,13 @@ const MENU = 'Alina Sales';
 const POINTS_SHEET = 'Точки';
 const TASKS_SHEET = 'Задания';
 const LOG_SHEET = 'Журнал';
+const STAFF_SHEET = 'Сотрудники';
+const DAY_SHEET = 'День';
 const PHOTO_ROOT = 'Alina 2GIS фото';
 const TZ = 'Asia/Almaty';
 const FAR_METERS = 300; // визит дальше этого от точки — «далеко от точки» в статистике
+const TOKEN_DAYS = 90;  // сколько дней телефон остаётся авторизованным без ввода PIN на сервере
+const PIN_TRIES = 5;    // неверных PIN подряд до блокировки на 15 минут
 
 // Колонки листа «Точки»
 const P = {
@@ -34,7 +38,7 @@ const RESULT_FIELDS = [
   ['phone', 'Телефон'], ['whatsapp', 'WhatsApp'], ['instagram', 'Instagram / сайт'],
   ['assortment', 'Ассортимент'], ['competitors', 'Бренды конкурентов'],
   ['supplier', 'Поставщик'], ['alina', 'Работают с Alina'], ['ourBrands', 'Наши бренды в точке'],
-  ['interest', 'Интерес'], ['nextStep', 'Итог / следующий шаг'],
+  ['interest', 'Интерес'], ['nextStep', 'Итог / следующий шаг'], ['nextDate', 'Дата след. шага'],
   ['comment', 'Комментарий'], ['photos', 'Фото'],
   ['visit', 'Визит №'], ['gps', 'GPS агента'], ['distance', 'До точки, м'],
   ['id', 'id'], ['uid', 'uid'],
@@ -53,6 +57,18 @@ const TS_DONE = 'выполнено';
 const TS_CANCEL = 'отменено';
 
 const LOG_HEADER = ['Время', 'Агент', 'Действие', 'id', 'Детали'];
+
+// Колонки листа «Сотрудники»: PIN хранится только хэшем с солью
+const S = { name: 0, hash: 1, salt: 2, role: 3, status: 4, created: 5, last: 6, ver: 7 };
+const STAFF_HEADER = ['Имя', 'PIN-хэш', 'Соль', 'Роль', 'Статус', 'Создан', 'Последний вход', 'Версия PIN'];
+const ROLE_AGENT = 'агент';
+const ROLE_MANAGER = 'руководитель';
+const ST_ACTIVE = 'активен';
+const ST_BLOCKED = 'заблокирован';
+
+// Колонки листа «День»: цель и рабочий день агента, строка на агента в день
+const D = { date: 0, agent: 1, goal: 2, start: 3, startGps: 4, end: 5, endGps: 6 };
+const DAY_HEADER = ['Дата', 'Агент', 'Цель (точек)', 'Начало', 'GPS начала', 'Конец', 'GPS конца'];
 
 /* ---------------- Меню ---------------- */
 
@@ -234,15 +250,17 @@ function releaseStale() {
 
 /* ---------------- Веб-приложение ---------------- */
 
+// Каждый запрос, кроме входа, несёт токен; имя агента берётся из токена, а не из запроса
 function doGet(e) {
   return handle_(() => {
     const q = e.parameter || {};
+    if (q.action === 'ping') return {};
+    auth_(q.token);
     if (q.action === 'summary') return summary_();
     if (q.action === 'points') return { points: points_(Number(q.route)) };
     if (q.action === 'result') return { result: result_(q.id) };
     if (q.action === 'history') return { visits: history_(q.id) };
     if (q.action === 'tasks') return { tasks: tasks_(q.point) };
-    if (q.action === 'ping') return { ok: true };
     throw new Error('Неизвестное действие');
   });
 }
@@ -250,8 +268,10 @@ function doGet(e) {
 function doPost(e) {
   return handle_(() => {
     const body = JSON.parse(e.postData.contents);
-    const agent = String(body.agent || '').trim();
-    if (!agent) throw new Error('Не указано имя агента');
+    if (body.action === 'register') return withLock_(() => register_(body.name, body.pin, body.managerCode));
+    if (body.action === 'login') return withLock_(() => login_(body.name, body.pin));
+    const me = auth_(body.token);
+    const agent = me.name;
     switch (body.action) {
       case 'claim': return withLock_(() => claim_(body.id, agent));
       case 'release': return withLock_(() => release_(body.id, agent));
@@ -262,9 +282,18 @@ function doPost(e) {
       case 'taskTake': return withLock_(() => taskTake_(agent, body.id));
       case 'taskRelease': return withLock_(() => taskRelease_(agent, body.id));
       case 'taskDone': return withLock_(() => taskDone_(agent, body.id, body.result, body.photos || []));
-      case 'taskCancel': return withLock_(() => taskCancel_(agent, body.id, body.code));
-      case 'managerLogin': checkManager_(body.code); return {};
-      case 'stats': checkManager_(body.code); return { stats: stats_(Number(body.from) || 0) };
+      case 'taskCancel': return withLock_(() => taskCancel_(me, body.id));
+      case 'pinChange': return withLock_(() => pinChange_(me, body.old, body.pin));
+      case 'becomeManager': return withLock_(() => becomeManager_(me, body.code));
+      case 'goalSet': return withLock_(() => goalSet_(agent, body.goal));
+      case 'dayStart': return withLock_(() => dayStart_(agent, body.geo));
+      case 'dayEnd': return withLock_(() => dayEnd_(agent, body.geo));
+      case 'me': return { me: me_(me, Number(body.from) || 0, body.who) };
+      case 'stats': requireManager_(me); return { stats: stats_(Number(body.from) || 0) };
+      case 'staff': requireManager_(me); return { staff: staff_() };
+      case 'staffReset': requireManager_(me); return withLock_(() => staffSet_(me, body.name, 'reset'));
+      case 'staffBlock': requireManager_(me); return withLock_(() => staffSet_(me, body.name, body.blocked ? 'block' : 'unblock'));
+      case 'staffRole': requireManager_(me); return withLock_(() => staffSet_(me, body.name, body.role === ROLE_MANAGER ? 'manager' : 'agent'));
     }
     throw new Error('Неизвестное действие');
   });
@@ -273,8 +302,14 @@ function doPost(e) {
 function handle_(fn) {
   let out;
   try { out = Object.assign({ ok: true }, fn()); }
-  catch (err) { out = { ok: false, error: String(err && err.message || err) }; }
+  catch (err) { out = { ok: false, error: String(err && err.message || err), code: err && err.code || '' }; }
   return ContentService.createTextOutput(JSON.stringify(out)).setMimeType(ContentService.MimeType.JSON);
+}
+
+const fail_ = (message, code) => { const e = new Error(message); if (code) e.code = code; throw e; };
+
+function requireManager_(me) {
+  if (me.role !== ROLE_MANAGER) fail_('Только для руководителя');
 }
 
 function withLock_(fn) {
@@ -398,11 +433,21 @@ function complete_(id, agent, form, photos) {
 
 /** GPS агента при отправке анкеты и расстояние до координат точки. */
 function geoInfo_(row, geo) {
-  if (!geo || geo.lat == null || geo.lon == null) return { gps: '', distance: '' };
-  const lat = Number(geo.lat), lon = Number(geo.lon);
-  const gps = lat.toFixed(6) + ', ' + lon.toFixed(6) + (geo.acc ? ' (±' + Math.round(geo.acc) + ' м)' : '');
+  const gps = gpsText_(geo);
+  if (!gps) return { gps: '', distance: '' };
   const has = row[P.lat] !== '' && row[P.lon] !== '' && row[P.acc] !== 'нет';
-  return { gps, distance: has ? Math.round(meters_(lat, lon, Number(row[P.lat]), Number(row[P.lon]))) : '' };
+  return { gps, distance: has ? Math.round(meters_(Number(geo.lat), Number(geo.lon), Number(row[P.lat]), Number(row[P.lon]))) : '' };
+}
+
+/** GPS как текст для таблицы: «43.250000, 76.900000 (±12 м)»; parseGps_ читает его обратно для карты. */
+function gpsText_(geo) {
+  if (!geo || geo.lat == null || geo.lon == null) return '';
+  return Number(geo.lat).toFixed(6) + ', ' + Number(geo.lon).toFixed(6) + (geo.acc ? ' (±' + Math.round(geo.acc) + ' м)' : '');
+}
+
+function parseGps_(s) {
+  const m = String(s || '').match(/(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)/);
+  return m ? { lat: Number(m[1]), lon: Number(m[2]) } : null;
 }
 
 function meters_(lat1, lon1, lat2, lon2) {
@@ -575,7 +620,8 @@ function taskCreate_(agent, pointId, items, due) {
   items = items.filter(it => it && String(it.type || '').trim());
   if (!items.length) throw new Error('Выберите хотя бы одно задание');
   const now = new Date();
-  const stamp = Utilities.formatDate(now, TZ, 'yyMMdd-HHmmss');
+  // Случайный хвост: два задания в одну секунду не должны получить одинаковый id
+  const stamp = Utilities.formatDate(now, TZ, 'yyMMdd-HHmmss') + Utilities.getUuid().slice(0, 4);
   const dueStr = /^\d{4}-\d{2}-\d{2}$/.test(String(due || '')) ? String(due) : '';
   const rows = items.map((it, i) => ['T' + stamp + '-' + (i + 1), row[P.id], row[P.route], row[P.name], row[P.address],
     String(it.type).trim(), String(it.comment || '').trim(), dueStr, agent, now, TS_NEW, '', '', '', '', '']);
@@ -621,12 +667,12 @@ function taskDone_(agent, id, result, photos) {
   return { task: toTask_(t.row) };
 }
 
-function taskCancel_(agent, id, code) {
+function taskCancel_(me, id) {
   const t = findTask_(id);
-  if (t.row[T.author] !== agent) checkManager_(code);
+  if (t.row[T.author] !== me.name && me.role !== ROLE_MANAGER) fail_('Отменить может автор задания или руководитель');
   if (t.row[T.status] === TS_DONE) throw new Error('Задание уже выполнено');
   setTask_(t, { status: TS_CANCEL });
-  log_(agent, 'отменил задание', id, t.row[T.type] + ' — ' + t.row[T.name]);
+  log_(me.name, 'отменил задание', id, t.row[T.type] + ' — ' + t.row[T.name]);
   return { task: toTask_(t.row) };
 }
 
@@ -636,67 +682,75 @@ function log_(agent, action, id, details) {
   try { logSheet_().appendRow([new Date(), agent, action, String(id || ''), String(details || '')]); } catch (e) {}
 }
 
-/** Статистика для руководителя: визиты (листы «Маршрут N»), задания, лента из «Журнала». from — мс, 0 = всё время. */
-function stats_(from) {
-  const ss = SpreadsheetApp.getActive();
-  const now = new Date();
-  const today = Utilities.formatDate(now, TZ, 'yyyy-MM-dd');
-  const by = {};
-  const ag = (name) => by[name] || (by[name] = { name, visits: 0, newPoints: 0, far: 0, noGps: 0,
-    issued: 0, taken: 0, done: 0, inWork: 0, overdue: 0, last: 0 });
-  const seen = (a, t) => { if (t > a.last) a.last = t; };
-  const inPeriod = (t) => t && t >= from;
-
-  ss.getSheets().filter(sh => /^Маршрут \d+$/.test(sh.getName())).forEach(sh => {
+/** Все визиты из листов «Маршрут N» (в порядке строк) с временем t в мс. */
+function allVisits_() {
+  const out = [];
+  SpreadsheetApp.getActive().getSheets().filter(sh => /^Маршрут \d+$/.test(sh.getName())).forEach(sh => {
     const last = sh.getLastRow();
     if (last < 2) return;
     ensureResultColumns_(sh);
     sh.getRange(2, 1, last - 1, RESULT_FIELDS.length).getValues().forEach(v => {
       const r = toResult_(v);
-      let t = 0;
-      try { t = Utilities.parseDate(r.time, TZ, 'dd.MM.yyyy HH:mm').getTime(); } catch (e) {}
-      if (!r.agent || !inPeriod(t)) return;
-      const a = ag(r.agent);
-      a.visits++;
-      if (!(Number(r.visit) > 1)) a.newPoints++;
-      if (!r.gps) a.noGps++;
-      else if (r.distance !== '' && Number(r.distance) > FAR_METERS) a.far++;
-      seen(a, t);
+      r.t = 0;
+      try { r.t = Utilities.parseDate(r.time, TZ, 'dd.MM.yyyy HH:mm').getTime(); } catch (e) {}
+      out.push(r);
     });
+  });
+  return out;
+}
+
+const nameKey_ = (s) => String(s || '').trim().replace(/\s+/g, ' ').toLowerCase().replace(/ё/g, 'е');
+const todayStr_ = () => Utilities.formatDate(new Date(), TZ, 'yyyy-MM-dd');
+const dayStartMs_ = () => Utilities.parseDate(todayStr_() + ' 00:00', TZ, 'yyyy-MM-dd HH:mm').getTime();
+
+/** Статистика для руководителя: визиты, задания, лента, «Сегодня» по команде. from — мс, 0 = всё время. */
+function stats_(from) {
+  const visits = allVisits_();
+  const out = computeStats_(from, visits, '');
+  out.feed = feed_(from, '');
+  out.today = teamToday_(visits);
+  return out;
+}
+
+/** Счётчики по агентам за период; only — имя одного агента (для личного кабинета). */
+function computeStats_(from, visits, only) {
+  const today = todayStr_();
+  const by = {};
+  const ag = (name) => by[name] || (by[name] = { name, visits: 0, newPoints: 0, far: 0, noGps: 0,
+    issued: 0, taken: 0, done: 0, inWork: 0, overdue: 0, last: 0 });
+  const seen = (a, t) => { if (t > a.last) a.last = t; };
+  const inPeriod = (t) => t && t >= from;
+  const mine = (name) => !only || nameKey_(name) === nameKey_(only);
+
+  visits.forEach(r => {
+    if (!r.agent || !inPeriod(r.t) || !mine(r.agent)) return;
+    const a = ag(r.agent);
+    a.visits++;
+    if (!(Number(r.visit) > 1)) a.newPoints++;
+    if (!r.gps) a.noGps++;
+    else if (r.distance !== '' && Number(r.distance) > FAR_METERS) a.far++;
+    seen(a, r.t);
   });
 
   let issued = 0, takenN = 0, doneN = 0, open = 0, overdue = 0, hours = 0, hoursN = 0;
   allTasks_().values.forEach(row => {
     const task = toTask_(row);
+    if (only && !mine(task.author) && !mine(task.assignee)) return;
     const tc = row[T.created] instanceof Date ? row[T.created].getTime() : 0;
     const tt = row[T.taken] instanceof Date ? row[T.taken].getTime() : 0;
     const td = row[T.done] instanceof Date ? row[T.done].getTime() : 0;
-    if (inPeriod(tc) && task.author) { issued++; const a = ag(task.author); a.issued++; seen(a, tc); }
-    if (inPeriod(tt) && task.assignee) { takenN++; const a = ag(task.assignee); a.taken++; seen(a, tt); }
-    if (task.status === TS_DONE && inPeriod(td) && task.assignee) {
+    if (inPeriod(tc) && task.author && mine(task.author)) { issued++; const a = ag(task.author); a.issued++; seen(a, tc); }
+    if (inPeriod(tt) && task.assignee && mine(task.assignee)) { takenN++; const a = ag(task.assignee); a.taken++; seen(a, tt); }
+    if (task.status === TS_DONE && inPeriod(td) && task.assignee && mine(task.assignee)) {
       doneN++; const a = ag(task.assignee); a.done++; seen(a, td);
       if (tt) { hours += (td - tt) / 3600000; hoursN++; }
     }
-    if (task.status === TS_NEW || task.status === TS_WORK) {
+    if ((task.status === TS_NEW || task.status === TS_WORK) && (!only || mine(task.assignee))) {
       open++;
       if (task.status === TS_WORK && task.assignee) ag(task.assignee).inWork++;
       if (task.due && task.due < today) { overdue++; if (task.assignee) ag(task.assignee).overdue++; }
     }
   });
-
-  const feed = [];
-  const lsh = logSheet_();
-  const lastLog = lsh.getLastRow();
-  if (lastLog >= 2) {
-    const n = Math.min(lastLog - 1, 2000);
-    const rows = lsh.getRange(lastLog - n + 1, 1, n, LOG_HEADER.length).getValues();
-    for (let i = rows.length - 1; i >= 0 && feed.length < 100; i--) {
-      const t = rows[i][0] instanceof Date ? rows[i][0].getTime() : 0;
-      if (!inPeriod(t)) continue;
-      feed.push({ time: new Date(t).toISOString(), agent: String(rows[i][1]), action: String(rows[i][2]),
-        id: String(rows[i][3]), details: String(rows[i][4]) });
-    }
-  }
 
   const agents = Object.keys(by).map(k => {
     const a = by[k];
@@ -709,8 +763,274 @@ function stats_(from) {
       issued, taken: takenN, done: doneN, open, overdue,
       avgHours: hoursN ? Math.round(hours / hoursN * 10) / 10 : null,
     },
-    agents, feed, farMeters: FAR_METERS,
+    agents, farMeters: FAR_METERS,
   };
+}
+
+/** Последние 100 действий из «Журнала» за период (only — одного агента). */
+function feed_(from, only) {
+  const feed = [];
+  const lsh = logSheet_();
+  const lastLog = lsh.getLastRow();
+  if (lastLog < 2) return feed;
+  const n = Math.min(lastLog - 1, 3000);
+  const rows = lsh.getRange(lastLog - n + 1, 1, n, LOG_HEADER.length).getValues();
+  for (let i = rows.length - 1; i >= 0 && feed.length < 100; i--) {
+    const t = rows[i][0] instanceof Date ? rows[i][0].getTime() : 0;
+    if (!t || t < from) continue;
+    if (only && nameKey_(rows[i][1]) !== nameKey_(only)) continue;
+    feed.push({ time: new Date(t).toISOString(), agent: String(rows[i][1]), action: String(rows[i][2]),
+      id: String(rows[i][3]), details: String(rows[i][4]) });
+  }
+  return feed;
+}
+
+/* ---------------- Вход: PIN и токены ---------------- */
+
+function hashPin_(salt, pin) {
+  return Utilities.base64Encode(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,
+    salt + ':' + pin, Utilities.Charset.UTF_8));
+}
+
+function tokenSecret_() {
+  const props = PropertiesService.getScriptProperties();
+  let s = props.getProperty('TOKEN_SECRET');
+  if (!s) { s = Utilities.getUuid() + Utilities.getUuid(); props.setProperty('TOKEN_SECRET', s); }
+  return s;
+}
+
+const sign_ = (payload) => Utilities.base64EncodeWebSafe(
+  Utilities.computeHmacSha256Signature(payload, tokenSecret_(), Utilities.Charset.UTF_8));
+
+/** Токен: имя.время.версияPIN.подпись — хранить не нужно, сброс PIN меняет версию и гасит старые токены. */
+function makeToken_(name, ver) {
+  const payload = Utilities.base64EncodeWebSafe(name, Utilities.Charset.UTF_8) + '.' + Date.now().toString(36) + '.' + ver;
+  return payload + '.' + sign_(payload);
+}
+
+function auth_(token) {
+  const parts = String(token || '').split('.');
+  if (parts.length !== 4) fail_('Войдите в приложение', 'auth');
+  const payload = parts.slice(0, 3).join('.');
+  if (sign_(payload) !== parts[3]) fail_('Войдите заново', 'auth');
+  if (Date.now() - parseInt(parts[1], 36) > TOKEN_DAYS * 86400000) fail_('Сессия истекла — войдите заново', 'auth');
+  const name = Utilities.newBlob(Utilities.base64DecodeWebSafe(parts[0])).getDataAsString('UTF-8');
+  const st = findStaff_(name);
+  if (!st || !st.row[S.hash] || String(Number(st.row[S.ver]) || 1) !== parts[2]) fail_('Войдите заново', 'auth');
+  if (st.row[S.status] === ST_BLOCKED) fail_('Доступ закрыт — обратитесь к руководителю', 'auth');
+  return { name: String(st.row[S.name]), role: String(st.row[S.role] || ROLE_AGENT) };
+}
+
+const session_ = (name, role, ver) => ({ token: makeToken_(name, ver), name, role });
+const checkPin_ = (pin) => { if (!/^\d{4}$/.test(String(pin || ''))) fail_('PIN — 4 цифры'); return String(pin); };
+
+function register_(name, pin, managerCode) {
+  name = String(name || '').trim().replace(/\s+/g, ' ');
+  if (name.length < 2) fail_('Укажите имя и фамилию');
+  pin = checkPin_(pin);
+  if (managerCode) checkManager_(managerCode);
+  const salt = Utilities.getUuid();
+  const now = new Date();
+  const st = findStaff_(name);
+  let role = managerCode ? ROLE_MANAGER : ROLE_AGENT;
+  let ver = 1;
+  if (st) {
+    if (st.row[S.status] === ST_BLOCKED) fail_('Доступ закрыт — обратитесь к руководителю');
+    if (st.row[S.hash]) fail_('Это имя уже зарегистрировано — войдите своим PIN или попросите руководителя сбросить PIN', 'exists');
+    // PIN сброшен руководителем: человек задаёт новый, роль сохраняется
+    name = String(st.row[S.name]);
+    if (st.row[S.role] === ROLE_MANAGER) role = ROLE_MANAGER;
+    ver = (Number(st.row[S.ver]) || 1) + 1;
+    st.sh.getRange(st.rowIndex, 1, 1, STAFF_HEADER.length)
+      .setValues([[name, hashPin_(salt, pin), salt, role, ST_ACTIVE, st.row[S.created] || now, now, ver]]);
+  } else {
+    staffSheet_().appendRow([name, hashPin_(salt, pin), salt, role, ST_ACTIVE, now, now, ver]);
+  }
+  log_(name, 'зарегистрировался', '', role);
+  return session_(name, role, ver);
+}
+
+function login_(name, pin) {
+  const st = findStaff_(name);
+  if (!st || !st.row[S.hash]) fail_('Вы входите впервые — придумайте PIN', 'not_registered');
+  if (st.row[S.status] === ST_BLOCKED) fail_('Доступ закрыт — обратитесь к руководителю');
+  const cache = CacheService.getScriptCache();
+  const key = 'pinfail:' + Utilities.base64EncodeWebSafe(nameKey_(name), Utilities.Charset.UTF_8);
+  const fails = Number(cache.get(key)) || 0;
+  if (fails >= PIN_TRIES) fail_('Слишком много попыток. Подождите 15 минут');
+  if (hashPin_(st.row[S.salt], String(pin || '')) !== st.row[S.hash]) {
+    cache.put(key, String(fails + 1), 900);
+    const left = PIN_TRIES - fails - 1;
+    fail_(left > 0 ? 'Неверный PIN. Осталось попыток: ' + left : 'Неверный PIN. Вход заблокирован на 15 минут', 'bad_pin');
+  }
+  cache.remove(key);
+  st.sh.getRange(st.rowIndex, S.last + 1).setValue(new Date());
+  return session_(String(st.row[S.name]), String(st.row[S.role] || ROLE_AGENT), Number(st.row[S.ver]) || 1);
+}
+
+function pinChange_(me, oldPin, pin) {
+  const st = findStaff_(me.name);
+  if (hashPin_(st.row[S.salt], String(oldPin || '')) !== st.row[S.hash]) fail_('Неверный текущий PIN');
+  pin = checkPin_(pin);
+  const salt = Utilities.getUuid();
+  const ver = (Number(st.row[S.ver]) || 1) + 1;
+  st.sh.getRange(st.rowIndex, S.hash + 1, 1, 2).setValues([[hashPin_(salt, pin), salt]]);
+  st.sh.getRange(st.rowIndex, S.ver + 1).setValue(ver);
+  log_(me.name, 'сменил PIN', '', '');
+  return session_(me.name, me.role, ver);
+}
+
+function becomeManager_(me, code) {
+  checkManager_(code);
+  const st = findStaff_(me.name);
+  st.sh.getRange(st.rowIndex, S.role + 1).setValue(ROLE_MANAGER);
+  log_(me.name, 'стал руководителем', '', '');
+  return session_(me.name, ROLE_MANAGER, Number(st.row[S.ver]) || 1);
+}
+
+function findStaff_(name) {
+  const sh = staffSheet_();
+  const last = sh.getLastRow();
+  if (last < 2 || !String(name || '').trim()) return null;
+  const values = sh.getRange(2, 1, last - 1, STAFF_HEADER.length).getValues();
+  const i = values.findIndex(row => nameKey_(row[S.name]) === nameKey_(name));
+  return i < 0 ? null : { sh, rowIndex: i + 2, row: values[i] };
+}
+
+function staff_() {
+  const sh = staffSheet_();
+  const last = sh.getLastRow();
+  if (last < 2) return [];
+  return sh.getRange(2, 1, last - 1, STAFF_HEADER.length).getValues().filter(r => r[S.name]).map(r => ({
+    name: String(r[S.name]), role: String(r[S.role] || ROLE_AGENT), status: String(r[S.status] || ST_ACTIVE),
+    hasPin: !!r[S.hash], created: iso_(r[S.created]), last: iso_(r[S.last]),
+  }));
+}
+
+/** Руководитель: сброс PIN, блокировка, роль. Любое изменение гасит токены сотрудника. */
+function staffSet_(me, name, what) {
+  const st = findStaff_(name);
+  if (!st) fail_('Сотрудник не найден');
+  if (nameKey_(st.row[S.name]) === nameKey_(me.name) && what !== 'reset') fail_('Нельзя изменить себя');
+  const ver = (Number(st.row[S.ver]) || 1) + 1;
+  if (what === 'reset') st.sh.getRange(st.rowIndex, S.hash + 1, 1, 2).setValues([['', '']]);
+  if (what === 'block' || what === 'unblock') st.sh.getRange(st.rowIndex, S.status + 1).setValue(what === 'block' ? ST_BLOCKED : ST_ACTIVE);
+  if (what === 'manager' || what === 'agent') st.sh.getRange(st.rowIndex, S.role + 1).setValue(what === 'manager' ? ROLE_MANAGER : ROLE_AGENT);
+  st.sh.getRange(st.rowIndex, S.ver + 1).setValue(ver);
+  const labels = { reset: 'сбросил PIN', block: 'заблокировал', unblock: 'разблокировал', manager: 'назначил руководителем', agent: 'назначил агентом' };
+  log_(me.name, labels[what], '', String(st.row[S.name]));
+  return { staff: staff_() };
+}
+
+/* ---------------- Рабочий день, цель, личный кабинет ---------------- */
+
+function dayRow_(agent, date) {
+  const sh = daySheet_();
+  const last = sh.getLastRow();
+  const values = last < 2 ? [] : sh.getRange(2, 1, last - 1, DAY_HEADER.length).getValues();
+  const i = values.findIndex(r => String(r[D.date]) === date && nameKey_(r[D.agent]) === nameKey_(agent));
+  if (i >= 0) return { sh, rowIndex: i + 2, row: values[i] };
+  const row = [date, agent, '', '', '', '', ''];
+  sh.getRange(last + 1, 1, 1, DAY_HEADER.length).setNumberFormat('@').setValues([row]);
+  return { sh, rowIndex: last + 1, row };
+}
+
+function setDay_(d, cols) {
+  Object.keys(cols).forEach(k => {
+    d.sh.getRange(d.rowIndex, D[k] + 1).setValue(cols[k]);
+    d.row[D[k]] = cols[k];
+  });
+}
+
+const dayOut_ = (row) => ({
+  goal: Number(row[D.goal]) || 0, start: String(row[D.start] || ''), end: String(row[D.end] || ''),
+});
+// Время дня хранится текстом ISO, чтобы таблица не меняла формат
+const nowIso_ = () => new Date().toISOString();
+
+function goalSet_(agent, goal) {
+  const n = Math.round(Number(goal));
+  if (!(n >= 1 && n <= 200)) fail_('Цель — от 1 до 200 точек');
+  const d = dayRow_(agent, todayStr_());
+  setDay_(d, { goal: n });
+  log_(agent, 'цель дня', '', n + ' точек');
+  return { day: dayOut_(d.row) };
+}
+
+function dayStart_(agent, geo) {
+  const d = dayRow_(agent, todayStr_());
+  if (d.row[D.start] && !d.row[D.end]) fail_('Рабочий день уже начат');
+  // Повторное начало после окончания — продолжение того же дня
+  if (d.row[D.start]) setDay_(d, { end: '', endGps: '' });
+  else setDay_(d, { start: nowIso_(), startGps: gpsText_(geo) });
+  log_(agent, 'начал день', '', gpsText_(geo) ? 'GPS отмечен' : 'без GPS');
+  return { day: dayOut_(d.row) };
+}
+
+function dayEnd_(agent, geo) {
+  const d = dayRow_(agent, todayStr_());
+  if (!d.row[D.start]) fail_('Рабочий день ещё не начат');
+  setDay_(d, { end: nowIso_(), endGps: gpsText_(geo) });
+  log_(agent, 'закончил день', '', gpsText_(geo) ? 'GPS отмечен' : 'без GPS');
+  return { day: dayOut_(d.row) };
+}
+
+/** Личный кабинет: свои цифры за период, сегодня (цель, рабочий день), дела. Руководитель может смотреть любого (who). */
+function me_(me, from, who) {
+  const name = who && me.role === ROLE_MANAGER ? String(who) : me.name;
+  const visits = allVisits_();
+  const period = computeStats_(from, visits, name).totals;
+  const todayVisits = visits.filter(v => v.t >= dayStartMs_() && nameKey_(v.agent) === nameKey_(name)).length;
+  const sh = daySheet_();
+  const last = sh.getLastRow();
+  const today = todayStr_();
+  const row = (last < 2 ? [] : sh.getRange(2, 1, last - 1, DAY_HEADER.length).getValues())
+    .find(r => String(r[D.date]) === today && nameKey_(r[D.agent]) === nameKey_(name));
+  const st = findStaff_(name);
+  return {
+    name, role: st ? String(st.row[S.role] || ROLE_AGENT) : ROLE_AGENT,
+    period, today: Object.assign({ visits: todayVisits }, row ? dayOut_(row) : { goal: 0, start: '', end: '' }),
+    todo: todo_(name, visits), feed: feed_(from, name).slice(0, 30),
+  };
+}
+
+/** Дела: последний визит точки сделан мной и в нём стоит дата следующего шага. */
+function todo_(name, visits) {
+  const lastById = {};
+  visits.forEach(v => { if (v.id) lastById[v.id] = v; });
+  return Object.keys(lastById).map(k => lastById[k])
+    .filter(v => v.nextDate && nameKey_(v.agent) === nameKey_(name))
+    .map(v => ({ id: v.id, name: v.name, address: v.address, nextDate: v.nextDate, nextStep: v.nextStep }))
+    .sort((a, b) => a.nextDate < b.nextDate ? -1 : a.nextDate > b.nextDate ? 1 : 0);
+}
+
+/** «Сегодня» для руководителя: цель, рабочий день, визиты и последнее место каждого агента. */
+function teamToday_(visits) {
+  const start = dayStartMs_();
+  const today = todayStr_();
+  const by = {};
+  const ag = (name) => {
+    const k = nameKey_(name);
+    return by[k] || (by[k] = { name: String(name), goal: 0, visits: 0, start: '', end: '', startPos: null, lastPos: null, last: '' });
+  };
+  staff_().filter(s => s.status !== ST_BLOCKED).forEach(s => ag(s.name));
+  const sh = daySheet_();
+  const lastRow = sh.getLastRow();
+  (lastRow < 2 ? [] : sh.getRange(2, 1, lastRow - 1, DAY_HEADER.length).getValues())
+    .filter(r => String(r[D.date]) === today).forEach(r => {
+      const a = ag(r[D.agent]);
+      Object.assign(a, dayOut_(r), { startPos: parseGps_(r[D.startGps]) });
+    });
+  visits.forEach(v => {
+    if (!v.agent || v.t < start) return;
+    const a = ag(v.agent);
+    a.visits++;
+    const pos = parseGps_(v.gps);
+    if (pos) a.lastPos = Object.assign(pos, { time: new Date(v.t).toISOString(), point: v.name, id: v.id });
+    a.last = new Date(v.t).toISOString();
+  });
+  return Object.keys(by).map(k => by[k])
+    .sort((a, b) => (b.goal ? b.visits / b.goal : 0) - (a.goal ? a.visits / a.goal : 0) || b.visits - a.visits || a.name.localeCompare(b.name));
 }
 
 /* ---------------- Листы и папки ---------------- */
@@ -741,6 +1061,30 @@ function tasksSheet_() {
     sh.setColumnWidth(T.name + 1, 200);
     sh.setColumnWidth(T.type + 1, 280);
     sh.setColumnWidth(T.comment + 1, 260);
+  }
+  return sh;
+}
+
+function staffSheet_() {
+  const ss = SpreadsheetApp.getActive();
+  let sh = ss.getSheetByName(STAFF_SHEET);
+  if (!sh) {
+    sh = ss.insertSheet(STAFF_SHEET);
+    sh.getRange(1, 1, 1, STAFF_HEADER.length).setValues([STAFF_HEADER]).setFontWeight('bold').setBackground('#dbe7f5');
+    sh.setFrozenRows(1);
+    sh.setColumnWidth(S.name + 1, 220);
+  }
+  return sh;
+}
+
+function daySheet_() {
+  const ss = SpreadsheetApp.getActive();
+  let sh = ss.getSheetByName(DAY_SHEET);
+  if (!sh) {
+    sh = ss.insertSheet(DAY_SHEET);
+    sh.getRange(1, 1, 1, DAY_HEADER.length).setValues([DAY_HEADER]).setFontWeight('bold').setBackground('#dbe7f5');
+    sh.setFrozenRows(1);
+    sh.setColumnWidth(D.agent + 1, 200);
   }
   return sh;
 }

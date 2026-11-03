@@ -239,6 +239,58 @@ table.grid td.bad { color: var(--bad); font-weight: 600; }
 .spinner { text-align: center; color: var(--muted); padding: 40px 0; }
 .link-btn { background: none; border: 0; color: var(--link); padding: 12px 0; font-weight: 600; width: 100%; }
 
+/* Вход: PIN-клавиатура */
+.hero.compact { padding: 16px 16px 12px; }
+.hero.compact img { height: 40px; }
+.hero.compact p { margin-top: 6px; }
+.pin-card { text-align: center; }
+.pin-card h2 { font-size: 22px; }
+.pin-card > .muted { margin: 4px 0 0; }
+.pin-dots { display: flex; justify-content: center; gap: 18px; margin: 18px 0 20px; }
+.pin-dots span { width: 16px; height: 16px; border-radius: 50%; border: 2px solid var(--accent-2); }
+.pin-dots span.on { background: var(--accent-2); }
+.pin-dots.shake { animation: shake .35s; }
+@keyframes shake { 20%, 60% { transform: translateX(-10px); } 40%, 80% { transform: translateX(10px); } }
+.pin-pad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; max-width: 300px; margin: 0 auto 6px; }
+.pin-pad button {
+  height: 62px; border-radius: 16px; border: 0; background: var(--chip);
+  font-size: 26px; font-weight: 600; color: var(--ink); touch-action: manipulation;
+}
+.pin-pad button:active { background: var(--accent-2); color: #fff; }
+.pin-pad .pin-del, .pin-pad .pin-face { background: none; font-size: 22px; }
+.pin-pad .pin-face { font-size: 15px; color: var(--link); }
+details.mgr { margin-top: 10px; text-align: left; }
+details.mgr summary { color: var(--link); font-weight: 600; padding: 8px 0; cursor: pointer; text-align: center; }
+details.mgr .field { margin: 6px 0 0; }
+
+/* Кабинет */
+.profile { display: flex; align-items: center; gap: 14px; }
+.avatar {
+  flex: none; width: 54px; height: 54px; border-radius: 50%; display: grid; place-items: center;
+  background: var(--accent); color: #fff; font-weight: 700; font-size: 20px;
+}
+.goal-bar { height: 14px; border-radius: 99px; background: var(--chip); overflow: hidden; margin: 8px 0 6px; }
+.goal-bar > div { height: 100%; background: linear-gradient(90deg, var(--accent-2), var(--accent)); border-radius: 99px; transition: width .4s; }
+.goal-bar.full > div { background: var(--ok); }
+.goal-bar.small { height: 8px; margin: 6px 0 4px; }
+.goal-text { font-size: 15px; }
+.goal-pick { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 8px; }
+.goal-own { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; }
+.goal-own .btn { width: auto; min-width: 64px; }
+.goal-card { border-left-color: var(--ok); }
+.link-btn.inline { width: auto; padding: 4px 0; }
+.team-row { display: block; text-decoration: none; color: inherit; padding: 10px 0; border-top: 1px solid var(--line); }
+.team-row:first-child { border-top: 0; padding-top: 0; }
+.todo { display: block; text-decoration: none; color: inherit; padding: 8px 0; border-top: 1px solid var(--line); }
+.card h3 + .todo { border-top: 0; }
+
+/* Карта */
+.map { height: calc(100vh - 230px); height: calc(100dvh - 230px); min-height: 320px; border-radius: var(--radius); margin-bottom: 8px; position: relative; z-index: 0; }
+.map-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 13px; color: var(--muted); margin-bottom: 4px; }
+.map-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 5px; vertical-align: -1px; }
+.leaflet-popup-content { font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+.leaflet-popup-content a { color: #2a3b7e; font-weight: 600; }
+
 .toast {
   position: fixed; left: 16px; right: 16px; bottom: calc(20px + env(safe-area-inset-bottom));
   background: #222; color: #fff; padding: 14px 16px; border-radius: 12px; z-index: 50;

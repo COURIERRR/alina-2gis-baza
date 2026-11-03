@@ -31,14 +31,19 @@
     del(k) { try { localStorage.removeItem(k); } catch (e) {} },
   };
 
-  const me = { agent: store.get('agent', ''), role: store.get('role', ''), code: store.get('mcode', '') };
-  const isManager = () => me.role === 'manager' && !!me.code;
+  const ROLE_MANAGER = 'руководитель';
+  const LOCK_AFTER = 15 * 60000; // приложение просит PIN / Face ID после 15 минут в фоне
+  const me = { agent: store.get('agent', ''), role: store.get('role', ''), token: store.get('token', '') };
+  const isManager = () => me.role === ROLE_MANAGER && !!me.token;
+  let unlocked = false;
+  let faceIdOk = false;
   const ui = {
     q: '', sort: 'order', tab: store.get('ui:tab', 'free'), pos: null,
     tq: '', ttab: store.get('ui:ttab', 'free'), tstatus: 'open', tagent: '',
-    period: store.get('ui:period', 'today'), loginMgr: false, taskBack: null,
+    period: store.get('ui:period', 'today'), mperiod: store.get('ui:mperiod', 'day'), taskBack: null,
+    auth: { step: me.agent ? 'pin' : 'name', name: me.agent || store.get('lastAgent', ''), pin1: '' },
   };
-  const cache = { summary: store.get('cache:summary', null), points: {}, tasks: store.get('cache:tasks', null), stats: {} };
+  const cache = { summary: store.get('cache:summary', null), points: {}, tasks: store.get('cache:tasks', null), stats: {}, me: {} };
   let refreshTimer = null;
   let currentLoad = null;
 
@@ -173,15 +178,21 @@
     const url = CFG.API_URL;
     async function parse(res) {
       const data = await res.json();
-      if (!data.ok) { const e = new Error(data.error || 'Ошибка сервера'); e.server = true; throw e; }
+      if (!data.ok) {
+        const e = new Error(data.error || 'Ошибка сервера');
+        e.server = true;
+        e.code = data.code || '';
+        if (e.code === 'auth') setTimeout(() => authLost(e.message));
+        throw e;
+      }
       return data;
     }
-    const get = (action, q) => fetch(url + '?' + new URLSearchParams(Object.assign({ action }, q)))
+    const get = (action, q) => fetch(url + '?' + new URLSearchParams(Object.assign({ action, token: me.token }, q)))
       .then(parse);
     const post = (action, body) => fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify(Object.assign({ action, agent: me.agent }, body)),
+      body: JSON.stringify(Object.assign({ action, token: me.token }, body)),
     }).then(parse);
     return {
       ping: () => get('ping'),
@@ -199,9 +210,20 @@
       taskTake: (id) => post('taskTake', { id }).then((d) => d.task),
       taskRelease: (id) => post('taskRelease', { id }).then((d) => d.task),
       taskDone: (id, result, photos) => post('taskDone', { id, result, photos }).then((d) => d.task),
-      taskCancel: (id) => post('taskCancel', { id, code: me.code }).then((d) => d.task),
-      managerLogin: (agent, code) => post('managerLogin', { agent, code }),
-      stats: (from) => post('stats', { from, code: me.code }).then((d) => d.stats),
+      taskCancel: (id) => post('taskCancel', { id }).then((d) => d.task),
+      stats: (from) => post('stats', { from }).then((d) => d.stats),
+      login: (name, pin) => post('login', { name, pin }),
+      register: (name, pin, managerCode) => post('register', { name, pin, managerCode }),
+      pinChange: (old, pin) => post('pinChange', { old, pin }),
+      becomeManager: (code) => post('becomeManager', { code }),
+      goalSet: (goal) => post('goalSet', { goal }).then((d) => d.day),
+      dayStart: (geo) => post('dayStart', { geo }).then((d) => d.day),
+      dayEnd: (geo) => post('dayEnd', { geo }).then((d) => d.day),
+      me: (from, who) => post('me', { from, who }).then((d) => d.me),
+      staff: () => post('staff', {}).then((d) => d.staff),
+      staffReset: (name) => post('staffReset', { name }).then((d) => d.staff),
+      staffBlock: (name, blocked) => post('staffBlock', { name, blocked }).then((d) => d.staff),
+      staffRole: (name, role) => post('staffRole', { name, role }).then((d) => d.staff),
     };
   }
 
@@ -227,8 +249,23 @@
       }));
       return out;
     };
-    const fail = (m) => { const e = new Error(m); e.server = true; throw e; };
+    const fail = (m, code) => { const e = new Error(m); e.server = true; e.code = code || ''; throw e; };
     const find = async (id) => (await all()).find((x) => x.id === id) || fail('Точка не найдена');
+    const staffDb = () => store.get('mock:staff', []);
+    const findStaff = (name) => staffDb().find((s) => s.name.toLowerCase() === String(name).trim().toLowerCase());
+    const session = (s) => wait({ ok: true, token: 'mock.' + encodeURIComponent(s.name) + '.' + (s.ver || 1), name: s.name, role: s.role });
+    const dayDb = () => store.get('mock:day', {});
+    const dayKey = (name) => today() + '|' + name;
+    const dayOf = (name) => Object.assign({ goal: 0, start: '', end: '' }, dayDb()[dayKey(name)]);
+    const setDay = (name, patch) => {
+      const db = dayDb();
+      db[dayKey(name)] = Object.assign(dayOf(name), patch);
+      store.set('mock:day', db);
+      return wait(db[dayKey(name)]);
+    };
+    const visitsAll = () => results().map((r) => ({ agent: r.agent, t: Date.parse(r.time), visit: r.visit || 1,
+      distance: r.distance, gps: !!r.gps, geo: r.geo, id: r.id, nextDate: r.form.nextDate, nextStep: r.form.nextStep }));
+    const dayStartMs = () => { const d = new Date(); d.setHours(0, 0, 0, 0); return d.getTime(); };
     const setState = async (id, patch) => {
       const s = state();
       const cur = Object.assign({}, s[id], patch);
@@ -282,7 +319,7 @@
         const distance = geo && hasCoords(p) ? Math.round(km(geo, p) * 1000) : '';
         const visit = (p.visits || (p.status === 'выполнена' ? 1 : 0)) + 1;
         const now = new Date().toISOString();
-        list.push({ id, agent: who, time: now, form: f, photos: photos.length, visit, distance, gps: !!geo });
+        list.push({ id, agent: who, time: now, form: f, photos: photos.length, visit, distance, gps: !!geo, geo: geo || null });
         store.set('mock:results', list);
         log(who, visit > 1 ? 'повторный визит' : 'визит', id,
           p.name + (distance !== '' ? ' · ' + distance + ' м от точки' : geo ? ' · GPS отмечен' : ' · без GPS'));
@@ -366,11 +403,87 @@
         t.status = 'отменено';
         log(me.agent, 'отменил задание', id, t.type + ' — ' + t.name);
       }),
-      // В демо подходит любой код — настоящий проверяется только в Apps Script
-      managerLogin: async (agent, code) => wait(code ? { ok: true } : fail('Введите код')),
-      stats: async (from) => wait(computeStats(from,
-        results().map((r) => ({ agent: r.agent, t: Date.parse(r.time), visit: r.visit || 1, distance: r.distance, gps: !!r.gps })),
-        tasksDb(), logDb())),
+      stats: async (from) => {
+        const s = computeStats(from, visitsAll(), tasksDb(), logDb());
+        const pts = await all();
+        const by = {};
+        staffDb().filter((x) => x.status !== 'заблокирован').forEach((x) => { by[x.name] = { name: x.name, visits: 0, startPos: null, lastPos: null }; });
+        visitsAll().filter((v) => v.t >= dayStartMs()).forEach((v) => {
+          const a = by[v.agent] || (by[v.agent] = { name: v.agent, visits: 0, startPos: null, lastPos: null });
+          a.visits++;
+          a.last = new Date(v.t).toISOString();
+          if (v.geo) a.lastPos = { lat: v.geo.lat, lon: v.geo.lon, time: a.last, id: v.id, point: (pts.find((p) => p.id === v.id) || {}).name };
+        });
+        s.today = Object.values(by).map((a) => Object.assign(a, dayOf(a.name), { startPos: dayOf(a.name).startPos || null }));
+        return wait(s);
+      },
+      // Вход в демо: сотрудники и PIN хранятся в этом браузере; код руководителя — любой
+      login: async (name, pin) => {
+        const s = findStaff(name);
+        if (!s) fail('Вы входите впервые — придумайте PIN', 'not_registered');
+        if (s.status === 'заблокирован') fail('Доступ закрыт — обратитесь к руководителю');
+        if (s.pin !== pin) fail('Неверный PIN', 'bad_pin');
+        return session(s);
+      },
+      register: async (name, pin, managerCode) => {
+        if (!/^\d{4}$/.test(pin)) fail('PIN — 4 цифры');
+        const db = staffDb();
+        const s = findStaff(name);
+        if (s && s.pin) fail('Это имя уже зарегистрировано — войдите своим PIN', 'exists');
+        const rec = s || { name: String(name).trim().replace(/\s+/g, ' '), role: 'агент', status: 'активен', created: new Date().toISOString() };
+        Object.assign(rec, { pin, role: managerCode ? ROLE_MANAGER : rec.role, last: new Date().toISOString(), ver: (rec.ver || 0) + 1 });
+        store.set('mock:staff', s ? db.map((x) => x.name === s.name ? rec : x) : db.concat([rec]));
+        log(rec.name, 'зарегистрировался', '', rec.role);
+        return session(rec);
+      },
+      pinChange: async (old, pin) => {
+        const db = staffDb();
+        const s = db.find((x) => x.name === me.agent);
+        if (s.pin !== old) fail('Неверный текущий PIN');
+        s.pin = pin;
+        store.set('mock:staff', db);
+        return session(s);
+      },
+      becomeManager: async (code) => {
+        if (!code) fail('Неверный код руководителя');
+        const db = staffDb();
+        const s = db.find((x) => x.name === me.agent);
+        s.role = ROLE_MANAGER;
+        store.set('mock:staff', db);
+        return session(s);
+      },
+      goalSet: (goal) => { log(me.agent, 'цель дня', '', goal + ' точек'); return setDay(me.agent, { goal: Number(goal) }); },
+      dayStart: (geo) => {
+        const d = dayOf(me.agent);
+        if (d.start && !d.end) fail('Рабочий день уже начат');
+        log(me.agent, 'начал день', '', geo ? 'GPS отмечен' : 'без GPS');
+        return setDay(me.agent, d.start ? { end: '' } : { start: new Date().toISOString(), startPos: geo });
+      },
+      dayEnd: (geo) => {
+        if (!dayOf(me.agent).start) fail('Рабочий день ещё не начат');
+        log(me.agent, 'закончил день', '', geo ? 'GPS отмечен' : 'без GPS');
+        return setDay(me.agent, { end: new Date().toISOString() });
+      },
+      me: async (from, who) => {
+        const name = who && isManager() ? who : me.agent;
+        const visits = visitsAll();
+        const s = computeStats(from, visits, tasksDb(), logDb());
+        const row = s.agents.find((a) => a.name === name) || { visits: 0, newPoints: 0, far: 0, noGps: 0, issued: 0, taken: 0, done: 0 };
+        const pts = await all();
+        const lastById = {};
+        visits.forEach((v) => { lastById[v.id] = v; });
+        const todo = Object.values(lastById).filter((v) => v.nextDate && v.agent === name).map((v) => {
+          const p = pts.find((x) => x.id === v.id) || {};
+          return { id: v.id, name: p.name, address: p.address, nextDate: v.nextDate, nextStep: v.nextStep };
+        }).sort((a, b) => a.nextDate.localeCompare(b.nextDate));
+        return wait({ name, role: (findStaff(name) || {}).role || 'агент', period: row,
+          today: Object.assign({ visits: visits.filter((v) => v.agent === name && v.t >= dayStartMs()).length }, dayOf(name)),
+          todo, feed: s.feed.filter((e) => e.agent === name).slice(0, 30) });
+      },
+      staff: () => wait(staffDb().map((s) => ({ name: s.name, role: s.role, status: s.status, hasPin: !!s.pin, created: s.created, last: s.last }))),
+      staffReset: (name) => { const db = staffDb(); db.find((x) => x.name === name).pin = ''; store.set('mock:staff', db); return api.staff(); },
+      staffBlock: (name, blocked) => { const db = staffDb(); db.find((x) => x.name === name).status = blocked ? 'заблокирован' : 'активен'; store.set('mock:staff', db); return api.staff(); },
+      staffRole: (name, role) => { const db = staffDb(); db.find((x) => x.name === name).role = role; store.set('mock:staff', db); return api.staff(); },
     };
   }
 
@@ -382,7 +495,7 @@
 
   async function flushOutbox() {
     const items = outbox();
-    if (!items.length || flushOutbox.busy) return;
+    if (!items.length || flushOutbox.busy || !me.token || !unlocked) return;
     flushOutbox.busy = true;
     const rest = [];
     for (const it of items) {
@@ -418,17 +531,11 @@
     back.onclick = () => { location.hash = backHash; };
     $('logo').hidden = !!backHash;
     const who = $('who');
-    who.hidden = !me.agent;
-    who.textContent = me.agent + (isManager() ? ' · рук.' : '');
+    who.hidden = !(me.token && unlocked);
+    who.textContent = '👤 ' + me.agent + (isManager() ? ' · рук.' : '');
   }
 
-  $('who').onclick = () => {
-    if (confirm('Выйти из «' + me.agent + '»?')) {
-      me.agent = ''; me.role = ''; me.code = '';
-      store.del('agent'); store.del('role'); store.del('mcode');
-      route();
-    }
-  };
+  $('who').onclick = () => { location.hash = '#/me'; };
 
   function stopRefresh() { clearInterval(refreshTimer); refreshTimer = null; currentLoad = null; }
 
@@ -436,15 +543,21 @@
     stopRefresh();
     updateBanner();
     window.scrollTo(0, 0);
-    if (!me.agent) return loginView();
+    if (!me.token) return loginView();
+    if (!unlocked) return lockView();
     const h = location.hash.replace(/^#\/?/, '');
     let m;
     if ((m = h.match(/^r\/(\d+)$/))) return listView(Number(m[1]));
+    if ((m = h.match(/^map\/(\d+)$/))) return mapView(Number(m[1]));
     if ((m = h.match(/^p\/(R\d+-\d+)$/))) return pointView(m[1]);
     if ((m = h.match(/^give\/(R\d+-\d+)$/))) return giveView(m[1]);
     if ((m = h.match(/^td\/(T[\w-]+)$/))) return taskDoneView(m[1]);
+    if ((m = h.match(/^me(?:\/(.+))?$/))) return meView(m[1] ? decodeURIComponent(m[1]) : '');
+    if (h === 'pin') return pinChangeView();
     if (h === 'tasks') return tasksView();
     if (h === 'stats') return statsView();
+    if (h === 'staff') return staffView();
+    if (h === 'teammap') return teamMapView();
     return homeView();
   }
 
@@ -454,55 +567,287 @@
     $('retry').onclick = retry;
   }
 
-  /* ---------- Вход ---------- */
+  /* ---------- Вход: PIN, Face ID, блокировка ---------- */
+  const HERO = '<div class="hero compact"><img src="icons/alina-logo.svg" alt="Alina Group"><p>Торговая команда</p></div>';
+  const b64 = (buf) => btoa(String.fromCharCode.apply(null, new Uint8Array(buf)));
+  const unb64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+  const rnd = (n) => crypto.getRandomValues(new Uint8Array(n));
+
+  // Экран из 4 точек и цифровой клавиатуры. onPin вызывается, когда набраны 4 цифры.
+  let padPress = null;
+  function pinPad(opts) {
+    let pin = '';
+    let busy = false;
+    $app.innerHTML = HERO + `
+      <div class="card pin-card">
+        <h2>${esc(opts.title)}</h2>
+        ${opts.subtitle ? `<p class="muted">${esc(opts.subtitle)}</p>` : ''}
+        <div class="pin-dots" id="dots"><span></span><span></span><span></span><span></span></div>
+        <div class="pin-pad">
+          ${[1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => `<button type="button" data-k="${n}">${n}</button>`).join('')}
+          ${opts.onFaceId ? '<button type="button" data-k="face" class="pin-face" aria-label="Face ID">Face ID</button>' : '<span></span>'}
+          <button type="button" data-k="0">0</button>
+          <button type="button" data-k="del" class="pin-del" aria-label="Стереть">⌫</button>
+        </div>
+        ${opts.extra || ''}
+      </div>`;
+    const dots = () => { const d = $('dots'); if (d) d.querySelectorAll('span').forEach((s, i) => s.classList.toggle('on', i < pin.length)); };
+    const pad = {
+      shake() {
+        const d = $('dots');
+        if (!d) return;
+        d.classList.remove('shake');
+        void d.offsetWidth;
+        d.classList.add('shake');
+      },
+    };
+    padPress = async (k) => {
+      if (busy || !$('dots')) return;
+      if (k === 'face') return opts.onFaceId();
+      if (k === 'del') pin = pin.slice(0, -1);
+      else if (pin.length < 4) pin += k;
+      dots();
+      if (pin.length < 4) return;
+      busy = true;
+      const p = pin;
+      try { await opts.onPin(p, pad); } finally { busy = false; pin = ''; dots(); }
+    };
+    $app.querySelectorAll('.pin-pad [data-k]').forEach((b) => { b.onclick = () => padPress(b.dataset.k); });
+    return pad;
+  }
+  window.addEventListener('keydown', (e) => {
+    if (!padPress || !$('dots') || (e.target && /^(INPUT|TEXTAREA)$/.test(e.target.tagName))) return;
+    if (/^\d$/.test(e.key)) padPress(e.key);
+    else if (e.key === 'Backspace') padPress('del');
+  });
+
+  // Локальная проверка PIN для экрана блокировки (без связи): PBKDF2-хэш, сам PIN не хранится
+  async function pinDigest(pin, salt) {
+    const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(pin), 'PBKDF2', false, ['deriveBits']);
+    return b64(await crypto.subtle.deriveBits({ name: 'PBKDF2', salt: new TextEncoder().encode(salt), iterations: 100000, hash: 'SHA-256' }, key, 256));
+  }
+  async function savePinHash(pin) {
+    try { const salt = b64(rnd(16)); store.set('pinHash', { agent: me.agent, salt, hash: await pinDigest(pin, salt) }); } catch (e) {}
+  }
+  async function checkPinLocal(pin) {
+    const h = store.get('pinHash', null);
+    if (!h || h.agent !== me.agent) return null;
+    try { return (await pinDigest(pin, h.salt)) === h.hash; } catch (e) { return null; }
+  }
+
+  // Face ID / отпечаток: ключ на этом телефоне (WebAuthn), подтверждает разблокировку приложения
+  const faceIdAvailable = async () => {
+    try { return !!(window.PublicKeyCredential && await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable()); } catch (e) { return false; }
+  };
+  const faceIdOn = () => { const f = store.get('faceid', null); return !!(f && f.agent === me.agent); };
+  async function faceIdEnable() {
+    const cred = await navigator.credentials.create({ publicKey: {
+      rp: { name: 'Alina Sales' },
+      user: { id: rnd(16), name: me.agent, displayName: me.agent },
+      challenge: rnd(32),
+      pubKeyCredParams: [{ type: 'public-key', alg: -7 }, { type: 'public-key', alg: -257 }],
+      authenticatorSelection: { authenticatorAttachment: 'platform', userVerification: 'required', residentKey: 'discouraged' },
+      timeout: 60000, attestation: 'none',
+    } });
+    store.set('faceid', { agent: me.agent, id: b64(cred.rawId) });
+  }
+  async function faceIdUnlock() {
+    const f = store.get('faceid', null);
+    await navigator.credentials.get({ publicKey: {
+      challenge: rnd(32), timeout: 60000, userVerification: 'required',
+      allowCredentials: [{ type: 'public-key', id: unb64(f.id), transports: ['internal'] }],
+    } });
+  }
+
   function loginView() {
     setBar('Alina Sales');
-    const mgr = ui.loginMgr;
-    $app.innerHTML = `
-      <div class="hero"><img src="icons/alina-logo.svg" alt="Alina Group"><p>Торговая команда</p></div>
-      <div class="card">
-        <h2>${mgr ? 'Вход для руководителя' : 'Вход'}</h2>
-        <p class="muted">${mgr ? 'Руководитель видит статистику команды, все задания и ленту действий агентов.'
-          : 'Укажите своё имя — по нему видно, кто взял точку или задание.'}</p>
-        <form id="login">
-          <div class="field"><label for="agent">Имя и фамилия</label>
-            <input type="text" id="agent" autocomplete="name" required value="${esc(store.get('lastAgent', ''))}"></div>
-          ${mgr ? `<div class="field"><label for="code">Код руководителя</label>
-            <input type="password" id="code" inputmode="numeric" autocomplete="off" required></div>` : ''}
-          <button class="btn primary" type="submit" id="loginBtn">Войти</button>
-        </form>
-        <button class="link-btn" id="mode">${mgr ? '← Вход для агента' : 'Вход для руководителя'}</button>
+    const a = ui.auth;
+    if (a.step === 'name' || !a.name) {
+      $app.innerHTML = HERO + `
+        <div class="card">
+          <h2>Вход</h2>
+          <p class="muted">Укажите имя и фамилию — по ним видно, кто взял точку или задание. Дальше вход по PIN или Face ID.</p>
+          <form id="login">
+            <div class="field"><label for="agent">Имя и фамилия</label>
+              <input type="text" id="agent" autocomplete="name" required value="${esc(a.name)}"></div>
+            <button class="btn primary" type="submit">Далее</button>
+          </form>
+        </div>`;
+      $('login').onsubmit = (ev) => {
+        ev.preventDefault();
+        const name = $('agent').value.trim().replace(/\s+/g, ' ');
+        if (name.length < 2) return toast('Укажите имя и фамилию', true);
+        Object.assign(a, { name, step: 'pin', pin1: '' });
+        store.set('lastAgent', name);
+        loginView();
+      };
+      return;
+    }
+    const other = '<button class="link-btn" id="other">← Другое имя</button>';
+    if (a.step === 'pin') {
+      pinPad({
+        title: a.name, subtitle: 'Введите PIN', extra: other,
+        onPin: async (pin, pad) => {
+          try {
+            await finishLogin(await api.login(a.name, pin), pin);
+          } catch (e) {
+            if (e.code === 'not_registered') { Object.assign(a, { step: 'confirm', pin1: pin }); return loginView(); }
+            pad.shake();
+            toast(e.server ? e.message : 'Нет связи', true);
+          }
+        },
+      });
+    } else {
+      pinPad({
+        title: 'Повторите PIN',
+        subtitle: `«${a.name}» входит впервые. Повторите PIN — он станет вашим кодом входа.`,
+        extra: `<details class="mgr"><summary>Я руководитель</summary>
+            <div class="field"><input type="password" id="mcode" inputmode="numeric" autocomplete="off" placeholder="Код руководителя"></div>
+          </details>` + other,
+        onPin: async (pin, pad) => {
+          if (pin !== a.pin1) {
+            Object.assign(a, { step: 'pin', pin1: '' });
+            toast('PIN не совпал — наберите заново', true);
+            return loginView();
+          }
+          try {
+            await finishLogin(await api.register(a.name, pin, ($('mcode') || {}).value || ''), pin);
+          } catch (e) {
+            pad.shake();
+            toast(e.server ? e.message : 'Нет связи', true);
+            if (e.code === 'exists') { Object.assign(a, { step: 'pin', pin1: '' }); loginView(); }
+          }
+        },
+      });
+    }
+    $('other').onclick = () => { Object.assign(a, { step: 'name', pin1: '' }); loginView(); };
+  }
+
+  async function finishLogin(s, pin) {
+    me.agent = s.name; me.role = s.role; me.token = s.token;
+    store.set('agent', s.name); store.set('lastAgent', s.name); store.set('role', s.role); store.set('token', s.token);
+    store.set('lock:fails', 0);
+    await savePinHash(pin);
+    ui.auth = { step: 'pin', name: s.name, pin1: '' };
+    const f = store.get('faceid', null);
+    if (f && f.agent !== s.name) store.del('faceid');
+    unlocked = true;
+    if (!faceIdOn() && faceIdOk && !store.get('faceid:skip:' + s.name, false)) return faceIdOffer();
+    location.hash = '#/';
+    route();
+    flushOutbox();
+  }
+
+  function faceIdOffer() {
+    setBar('Alina Sales');
+    $app.innerHTML = HERO + `
+      <div class="card" style="text-align:center">
+        <div style="font-size:44px">🙂</div>
+        <h2>Входить по Face ID?</h2>
+        <p class="muted">Приложение будет открываться по Face ID (или отпечатку) вместо PIN. PIN остаётся запасным способом.</p>
+        <button class="btn primary" id="fon">Включить Face ID</button>
+        <button class="link-btn" id="foff">Не сейчас</button>
       </div>`;
-    $('mode').onclick = () => { ui.loginMgr = !mgr; loginView(); };
-    $('login').onsubmit = async (ev) => {
-      ev.preventDefault();
-      const agent = $('agent').value.trim().replace(/\s+/g, ' ');
-      if (!agent) return;
-      if (mgr) {
-        const code = $('code').value.trim();
-        const btn = $('loginBtn');
-        btn.disabled = true;
-        btn.textContent = 'Проверка…';
-        try {
-          await api.managerLogin(agent, code);
-        } catch (e) {
-          toast(e.server ? e.message : 'Нет связи', true);
-          btn.disabled = false;
-          btn.textContent = 'Войти';
-          return;
-        }
-        me.role = 'manager'; me.code = code;
-        store.set('role', 'manager'); store.set('mcode', code);
-      } else {
-        me.role = ''; me.code = '';
-        store.del('role'); store.del('mcode');
-      }
-      me.agent = agent;
-      store.set('agent', agent);
-      store.set('lastAgent', agent);
-      ui.loginMgr = false;
-      route();
+    const done = () => { location.hash = '#/'; route(); flushOutbox(); };
+    $('fon').onclick = async () => {
+      try { await faceIdEnable(); toast('Face ID включён'); } catch (e) { toast('Не получилось включить Face ID', true); }
+      done();
     };
+    $('foff').onclick = () => { store.set('faceid:skip:' + me.agent, true); done(); };
+  }
+
+  function lockView() {
+    setBar('Alina Sales');
+    const hasFace = faceIdOn();
+    const tryFace = async () => {
+      try { await faceIdUnlock(); unlock(); } catch (e) { /* отменили — остаётся ввод PIN */ }
+    };
+    pinPad({
+      title: me.agent, subtitle: hasFace ? 'Face ID или PIN' : 'Введите PIN',
+      onFaceId: hasFace ? tryFace : null,
+      extra: '<button class="link-btn" id="logout">Выйти / другой сотрудник</button>',
+      onPin: async (pin, pad) => {
+        const okLocal = await checkPinLocal(pin);
+        if (okLocal === true) return unlock();
+        if (okLocal === null) {
+          // На этом телефоне PIN ещё не сохранён — проверяем на сервере
+          try { return await finishLogin(await api.login(me.agent, pin), pin); } catch (e) {
+            pad.shake();
+            return toast(e.server ? e.message : 'Нет связи', true);
+          }
+        }
+        const fails = (store.get('lock:fails', 0) || 0) + 1;
+        store.set('lock:fails', fails);
+        if (fails >= 5) return logout('Слишком много попыток — войдите заново');
+        pad.shake();
+        toast('Неверный PIN. Осталось попыток: ' + (5 - fails), true);
+      },
+    });
+    $('logout').onclick = () => logout('', true);
+    if (hasFace && !lockView.tried) { lockView.tried = true; tryFace(); }
+  }
+
+  function unlock() {
+    unlocked = true;
+    store.set('lock:fails', 0);
+    route();
+    flushOutbox();
+  }
+
+  function lock() {
+    unlocked = false;
+    lockView.tried = false;
+    route();
+  }
+
+  // Выход: токен и PIN-хэш стираются; otherPerson — сразу на ввод имени
+  function logout(msg, otherPerson) {
+    me.token = ''; me.role = '';
+    store.del('token'); store.del('role'); store.del('pinHash');
+    unlocked = false;
+    lockView.tried = false;
+    ui.auth = { step: otherPerson ? 'name' : 'pin', name: otherPerson ? '' : me.agent, pin1: '' };
+    cache.me = {};
+    if (msg) toast(msg, true);
+    location.hash = '#/';
+    route();
+  }
+
+  // Сервер не принял токен (PIN сброшен, сменён на другом телефоне, доступ закрыт)
+  function authLost(msg) {
+    if (!me.token) return;
+    logout(msg || 'Войдите заново');
+  }
+
+  function pinChangeView() {
+    setBar('Смена PIN', '#/me');
+    const st = { step: 'old', old: '', pin1: '' };
+    const show = () => {
+      const titles = { old: 'Текущий PIN', new1: 'Новый PIN', new2: 'Повторите новый PIN' };
+      pinPad({
+        title: titles[st.step],
+        onPin: async (pin, pad) => {
+          if (st.step === 'old') { st.old = pin; st.step = 'new1'; return show(); }
+          if (st.step === 'new1') { st.pin1 = pin; st.step = 'new2'; return show(); }
+          if (pin !== st.pin1) { toast('PIN не совпал', true); st.step = 'new1'; return show(); }
+          try {
+            const s = await api.pinChange(st.old, pin);
+            me.token = s.token;
+            store.set('token', s.token);
+            await savePinHash(pin);
+            toast('PIN изменён');
+            location.hash = '#/me';
+          } catch (e) {
+            pad.shake();
+            toast(e.server ? e.message : 'Нет связи', true);
+            Object.assign(st, { step: 'old', old: '', pin1: '' });
+            show();
+          }
+        },
+      });
+      setBar('Смена PIN', '#/me');
+    };
+    show();
   }
 
   /* ---------- Главная: задания, статистика, маршруты ---------- */
@@ -524,7 +869,7 @@
     const isHome = () => location.hash.replace(/^#\/?/, '') === '';
     const navHtml = () => {
       const c = cache.tasks ? taskCounts(cache.tasks) : null;
-      return `<a class="card nav-card" href="#/tasks">
+      return goalCard(cache.me['|day']) + `<a class="card nav-card" href="#/tasks">
           <div class="row"><h2 class="grow">📋 Задания</h2><span class="muted">›</span></div>
           <div class="stats">${c ? `<span>Свободных <b>${c.free}</b></span><span>Мои <b>${c.mine}</b></span>` +
             (c.overdue ? `<span class="bad">Просрочено <b>${c.overdue}</b></span>` : '') : '<span>Загрузка…</span>'}</div>
@@ -554,6 +899,7 @@
         if (isHome()) render(routes);
       }).catch((e) => { if (!cache.summary) showError(e, homeView); else toast('Нет связи', true); });
       loadTasks().then(() => { if (isHome() && cache.summary) render(cache.summary); }).catch(() => {});
+      loadMe('day', '').then(() => { if (isHome() && cache.summary) render(cache.summary); }).catch(() => {});
     };
     load();
     currentLoad = load;
@@ -607,6 +953,7 @@
       $app.innerHTML = `
         <div class="tools">
           <input class="search" id="q" type="search" placeholder="Поиск по названию или адресу" value="${esc(ui.q)}">
+          <a class="btn ghost small" href="#/map/${routeNo}" style="flex:1 1 100%">🗺 Точки маршрута на карте</a>
           <div class="seg"><button data-sort="order" class="${ui.sort === 'order' ? 'on' : ''}">По порядку</button>
             <button data-sort="near" class="${ui.sort === 'near' ? 'on' : ''}">Ближайшие</button></div>
         </div>
@@ -809,6 +1156,8 @@
           <div class="field"><span class="label">Наши бренды в точке</span>${chips('ourBrands', OUR_BRANDS, 'checkbox', src.ourBrands || [])}</div>
           <div class="field"><span class="label">Интерес к сотрудничеству <span class="req">*</span></span>${chips('interest', INTEREST, 'radio', [src.interest])}</div>
           <div class="field"><label>Итог / следующий шаг</label><textarea name="nextStep" placeholder="Например: отправить прайс в WhatsApp, перезвонить в пятницу">${d('nextStep')}</textarea></div>
+          <div class="field"><label>Дата следующего шага</label><input type="date" name="nextDate" min="${today()}" value="${d('nextDate')}">
+            <div class="muted" style="margin-top:4px">Появится в «Моих делах» в этот день</div></div>
           <div class="field"><label>Комментарий</label><textarea name="comment">${d('comment')}</textarea></div>
           <div class="field"><span class="label">Фото витрины</span>
             <label class="btn ghost file-btn">📷 Добавить фото<input type="file" id="photo" accept="image/*" multiple></label>
@@ -966,7 +1315,7 @@
     const a = split(r.assortment, ASSORTMENT);
     const c = split(r.competitors, COMPETITORS);
     const out = {};
-    ['contact', 'position', 'phone', 'whatsapp', 'instagram', 'supplier', 'alina', 'interest', 'nextStep', 'comment']
+    ['contact', 'position', 'phone', 'whatsapp', 'instagram', 'supplier', 'alina', 'interest', 'nextStep', 'nextDate', 'comment']
       .forEach((k) => { out[k] = r[k] || ''; });
     return Object.assign(out, {
       assortment: a.chosen, assortmentOther: a.other,
@@ -1240,6 +1589,13 @@
       const tile = (v, label, bad) => `<div class="tile${bad && v ? ' bad' : ''}"><b>${v == null ? '—' : v}</b><span>${label}</span></div>`;
       const pointLink = (id) => /^R\d+-\d+$/.test(id) ? ` <a href="#/p/${esc(id)}">›</a>` : '';
       $app.innerHTML = `
+        <div class="section-title">Сегодня по команде</div>
+        <div class="card">${(s.today || []).length ? s.today.map(teamRow).join('') : '<div class="muted">Сотрудники ещё не входили</div>'}</div>
+        <div class="btns" style="margin-top:0">
+          <a class="btn ghost small" href="#/teammap">🗺 Карта команды</a>
+          <a class="btn ghost small" href="#/staff">👥 Сотрудники</a>
+        </div>
+        <div class="section-title">За период</div>
         <div class="seg tabs" style="margin-bottom:10px">${periods.map((p) =>
           `<button data-period="${p[0]}" class="${ui.period === p[0] ? 'on' : ''}">${p[1]}</button>`).join('')}</div>
         <div class="section-title">Визиты</div>
@@ -1256,7 +1612,7 @@
         <div class="section-title">По агентам</div>
         <div class="card">${s.agents.length ? `<div class="table-wrap"><table class="grid">
           <tr><th>Агент</th><th>Визиты</th><th>Новые</th><th>Далеко</th><th>Выдал</th><th>Взял</th><th>Сделал</th><th>В работе</th><th>Просроч.</th><th>Активность</th></tr>
-          ${s.agents.map((a) => `<tr><td>${esc(a.name)}</td><td>${a.visits}</td><td>${a.newPoints}</td>
+          ${s.agents.map((a) => `<tr><td><a href="#/me/${encodeURIComponent(a.name)}">${esc(a.name)}</a></td><td>${a.visits}</td><td>${a.newPoints}</td>
             <td class="${a.far ? 'bad' : ''}">${a.far}</td><td>${a.issued}</td><td>${a.taken}</td><td>${a.done}</td>
             <td>${a.inWork}</td><td class="${a.overdue ? 'bad' : ''}">${a.overdue}</td><td>${fmtTime(a.last)}</td></tr>`).join('')}
         </table></div>` : '<div class="muted">За этот период действий нет</div>'}</div>
@@ -1282,6 +1638,315 @@
     refreshTimer = setInterval(show, 60000);
   }
 
+  /* ---------- Личный кабинет: цель дня, рабочий день, статистика, дела ---------- */
+  function periodStart(k) {
+    const d = new Date();
+    d.setHours(0, 0, 0, 0);
+    if (k === 'week') d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
+    if (k === 'month') d.setDate(1);
+    return d.getTime();
+  }
+  function loadMe(period, who) {
+    return api.me(periodStart(period), who).then((m) => { cache.me[who + '|' + period] = m; return m; });
+  }
+  const hm = (iso) => { const d = new Date(iso); return pad(d.getHours()) + ':' + pad(d.getMinutes()); };
+  function duration(fromIso, toIso) {
+    const min = Math.max(0, Math.round(((toIso ? Date.parse(toIso) : Date.now()) - Date.parse(fromIso)) / 60000));
+    return (min >= 60 ? Math.floor(min / 60) + ' ч ' : '') + (min % 60) + ' мин';
+  }
+  function dayText(t) {
+    if (!t.start) return 'день не начат';
+    return t.end ? hm(t.start) + '–' + hm(t.end) + ' · ' + duration(t.start, t.end) : 'работает с ' + hm(t.start) + ' · ' + duration(t.start);
+  }
+  const goalPct = (t) => t.goal ? Math.min(100, Math.round(t.visits / t.goal * 100)) : 0;
+  function goalBar(t, small) {
+    const pct = goalPct(t);
+    return `<div class="goal-bar${small ? ' small' : ''}${pct >= 100 ? ' full' : ''}"><div style="width:${pct}%"></div></div>`;
+  }
+
+  // Карточка цели на главной
+  function goalCard(m) {
+    if (!m) return '';
+    const t = m.today;
+    const pct = goalPct(t);
+    return `<a class="card nav-card goal-card" href="#/me">
+      ${t.goal ? `<div class="row"><b class="grow">🎯 Цель дня: ${t.visits} из ${t.goal} точек</b><b>${pct}%</b></div>${goalBar(t)}
+        ${pct >= 100 ? '<div class="muted">🎉 Цель выполнена!</div>' : ''}`
+        : '<div class="row"><b class="grow">🎯 Поставьте цель на день</b><span class="muted">›</span></div>'}
+      ${t.start ? '' : '<div class="muted">▶️ Рабочий день не начат — начните в кабинете</div>'}
+    </a>`;
+  }
+
+  // Строка агента в блоке «Сегодня» у руководителя
+  function teamRow(a) {
+    const pct = goalPct(a);
+    return `<a class="team-row" href="#/me/${encodeURIComponent(a.name)}">
+      <div class="row"><b class="grow">${esc(a.name)}</b><span class="muted">${esc(dayText(a))}</span></div>
+      ${goalBar(a, true)}
+      <div class="muted">${a.goal ? `${a.visits} из ${a.goal} точек · ${pct}%${pct >= 100 ? ' 🎉' : ''}` : `${a.visits} визитов · цель не поставлена`}</div>
+    </a>`;
+  }
+
+  function meView(who) {
+    const own = !who || who === me.agent;
+    if (!own && !isManager()) { location.hash = '#/me'; return; }
+    who = own ? '' : who;
+    setBar(own ? 'Мой кабинет' : who, own ? '#/' : '#/stats');
+    const hash = location.hash;
+    const periods = [['day', 'День'], ['week', 'Неделя'], ['month', 'Месяц']];
+    let goalEdit = false;
+
+    const render = (m) => {
+      if (location.hash !== hash) return;
+      const t = m.today;
+      const p = m.period;
+      const pct = goalPct(t);
+      const td = today();
+      const soon = ymd(new Date(Date.now() + 7 * 86400000));
+      const todoGroups = [
+        ['Просрочено', m.todo.filter((x) => x.nextDate < td), 'bad'],
+        ['Сегодня', m.todo.filter((x) => x.nextDate === td), 'work'],
+        ['Ближайшие 7 дней', m.todo.filter((x) => x.nextDate > td && x.nextDate <= soon), 'info'],
+      ].filter((g) => g[1].length);
+      const initials = m.name.split(' ').map((w) => w[0]).slice(0, 2).join('').toUpperCase();
+      const tile = (v, label, bad) => `<div class="tile${bad && v ? ' bad' : ''}"><b>${v}</b><span>${label}</span></div>`;
+      $app.innerHTML = `
+        <div class="card profile">
+          <div class="avatar">${esc(initials)}</div>
+          <div class="grow"><h2>${esc(m.name)}</h2><span class="badge ${m.role === ROLE_MANAGER ? 'info' : ''}">${esc(m.role)}</span></div>
+        </div>
+        <div class="section-title">Сегодня</div>
+        <div class="card">
+          <div class="row"><h3 class="grow">🎯 Цель дня</h3>
+            ${own && t.goal && !goalEdit ? '<button class="link-btn inline" id="goalEdit">Изменить</button>' : ''}</div>
+          ${t.goal && !goalEdit ? `${goalBar(t)}
+            <div class="goal-text"><b>${t.visits} из ${t.goal}</b> точек · <b>${pct}%</b>${pct >= 100 ? ' · 🎉 Цель выполнена' : ''}</div>`
+            : own ? `<p class="muted" style="margin:0 0 8px">Сколько точек объедете сегодня? Каждый отправленный визит двигает шкалу — её видит руководитель.</p>
+              <div class="goal-pick">${[5, 10, 15, 20].map((n) => `<button class="btn small" data-goal="${n}">${n}</button>`).join('')}</div>
+              <div class="goal-own"><div class="field" style="margin:0"><input type="text" inputmode="numeric" id="goalOwn" placeholder="Своё число"></div>
+                <button class="btn small primary" id="goalSave">OK</button></div>`
+            : '<div class="muted">Цель не поставлена</div>'}
+        </div>
+        <div class="card">
+          <h3>🕘 Рабочий день</h3>
+          <div class="muted" style="margin-bottom:8px">${esc(dayText(t))}</div>
+          ${own ? (!t.start ? '<button class="btn primary" id="dayStart">▶️ Начать рабочий день</button>'
+            : !t.end ? '<button class="btn ghost" id="dayEnd">⏹ Закончить рабочий день</button>'
+            : '<button class="btn ghost" id="dayStart">▶️ Продолжить день</button>') : ''}
+        </div>
+        <div class="section-title">Статистика</div>
+        <div class="seg tabs" style="margin-bottom:10px">${periods.map((x) =>
+          `<button data-mp="${x[0]}" class="${ui.mperiod === x[0] ? 'on' : ''}">${x[1]}</button>`).join('')}</div>
+        <div class="tiles">
+          ${tile(p.visits, 'точек посещено')}${tile(p.newPoints, 'новых точек')}
+          ${tile(p.visits - p.newPoints, 'повторных визитов')}${tile(p.done, 'заданий выполнено')}
+          ${tile(p.taken, 'заданий взято')}${tile(p.issued, 'заданий выдано')}
+          ${tile(p.far, 'далеко от точки', true)}${tile(p.noGps, 'без GPS')}
+        </div>
+        <div class="section-title">${own ? 'Мои дела' : 'Дела'}</div>
+        ${todoGroups.length ? todoGroups.map((g) => `<div class="card">
+            <h3>${g[0]} <span class="badge ${g[2]}">${g[1].length}</span></h3>
+            ${g[1].map((x) => `<a class="todo" href="#/p/${esc(x.id)}">
+              <span class="badge ${g[2]}">${fmtDue(x.nextDate)}</span> <b>${esc(x.name || x.id)}</b>
+              ${x.nextStep ? `<div class="muted">${esc(x.nextStep)}</div>` : ''}</a>`).join('')}
+          </div>`).join('')
+          : '<div class="card muted">Дел нет. Дату следующего шага можно поставить в анкете визита.</div>'}
+        ${own ? `<a class="btn ghost" href="#/tasks" id="myTasks" style="margin-bottom:10px">📋 Мои задания</a>` : ''}
+        ${!own && m.feed.length ? `<div class="section-title">Последние действия</div><div class="card"><ul class="feed">${m.feed.map((e) =>
+          `<li><time>${fmtTime(e.time)}</time>${esc(e.action)}${e.details ? ' — ' + esc(e.details) : ''}</li>`).join('')}</ul></div>` : ''}
+        ${own ? `<div class="section-title">Настройки</div>
+          <div class="card">
+            ${faceIdOk ? `<div class="row" style="margin-bottom:10px"><span class="grow">Вход по Face ID</span>
+              <button class="btn small ${faceIdOn() ? 'ghost' : 'primary'}" id="faceToggle" style="width:auto">${faceIdOn() ? 'Выключить' : 'Включить'}</button></div>` : ''}
+            <a class="btn ghost" href="#/pin" style="margin-bottom:8px">🔑 Сменить PIN</a>
+            ${m.role !== ROLE_MANAGER ? `<details class="mgr"><summary>Я руководитель</summary>
+              <div class="goal-own"><div class="field" style="margin:0"><input type="password" inputmode="numeric" id="mcode" autocomplete="off" placeholder="Код руководителя"></div>
+              <button class="btn small primary" id="mgrSave">OK</button></div></details>` : ''}
+            <button class="btn ghost" id="logout" style="margin-top:8px">Выйти</button>
+          </div>` : ''}`;
+
+      const reload = () => { cache.me = {}; load(); };
+      const run = async (btn, fn, okMsg) => {
+        btn.disabled = true;
+        try { await fn(); if (okMsg) toast(okMsg); } catch (e) { toast(e.server ? e.message : 'Нет связи', true); }
+        reload();
+      };
+      $app.querySelectorAll('[data-mp]').forEach((b) => {
+        b.onclick = () => { ui.mperiod = b.dataset.mp; store.set('ui:mperiod', ui.mperiod); show(); };
+      });
+      $app.querySelectorAll('[data-goal]').forEach((b) => {
+        b.onclick = () => { goalEdit = false; run(b, () => api.goalSet(Number(b.dataset.goal)), 'Цель на сегодня: ' + b.dataset.goal + ' точек'); };
+      });
+      if ($('goalSave')) $('goalSave').onclick = (ev) => {
+        const n = Number($('goalOwn').value);
+        if (!(n >= 1 && n <= 200)) return toast('Цель — от 1 до 200 точек', true);
+        goalEdit = false;
+        run(ev.target, () => api.goalSet(n), 'Цель на сегодня: ' + n + ' точек');
+      };
+      if ($('goalEdit')) $('goalEdit').onclick = () => { goalEdit = true; render(m); };
+      if ($('dayStart')) $('dayStart').onclick = (ev) => {
+        ev.target.textContent = '📍 Определяем местоположение…';
+        run(ev.target, async () => api.dayStart(await getGeo()), 'Рабочий день начат');
+      };
+      if ($('dayEnd')) $('dayEnd').onclick = (ev) => {
+        if (!confirm('Закончить рабочий день?')) return;
+        run(ev.target, async () => api.dayEnd(await getGeo()), 'Рабочий день закончен');
+      };
+      if ($('myTasks')) $('myTasks').onclick = () => { ui.ttab = 'mine'; store.set('ui:ttab', 'mine'); };
+      if ($('faceToggle')) $('faceToggle').onclick = async () => {
+        if (faceIdOn()) { store.del('faceid'); toast('Face ID выключен'); return render(m); }
+        try { await faceIdEnable(); toast('Face ID включён'); } catch (e) { toast('Не получилось включить Face ID', true); }
+        render(m);
+      };
+      if ($('mgrSave')) $('mgrSave').onclick = (ev) => run(ev.target, async () => {
+        const s = await api.becomeManager($('mcode').value.trim());
+        me.role = s.role; me.token = s.token;
+        store.set('role', s.role); store.set('token', s.token);
+        setBar('Мой кабинет', '#/');
+      }, 'Вы руководитель — в главном меню появилась статистика команды');
+      if ($('logout')) $('logout').onclick = () => { if (confirm('Выйти из приложения?')) logout('', false); };
+    };
+
+    const load = () => loadMe(ui.mperiod, who).then(render)
+      .catch((e) => { if (!cache.me[who + '|' + ui.mperiod]) showError(e, () => meView(who)); else toast(e.server ? e.message : 'Нет связи', true); });
+    const show = () => {
+      const c = cache.me[who + '|' + ui.mperiod];
+      if (c) render(c); else $app.innerHTML = '<div class="spinner">Загрузка…</div>';
+      load();
+    };
+    show();
+    currentLoad = load;
+    refreshTimer = setInterval(load, 60000);
+  }
+
+  /* ---------- Сотрудники (руководитель) ---------- */
+  function staffView() {
+    if (!isManager()) { location.hash = '#/'; return; }
+    setBar('Сотрудники', '#/stats');
+    const hash = location.hash;
+    const render = (list) => {
+      if (location.hash !== hash) return;
+      $app.innerHTML = '<p class="muted">Сотрудник сам задаёт PIN при первом входе. Сброс PIN — он задаст новый при следующем входе. Любое изменение закрывает его текущий вход.</p>' +
+        list.map((s) => {
+          const self = s.name === me.agent;
+          const blocked = s.status === 'заблокирован';
+          return `<div class="card">
+            <div class="row"><b class="grow"><a href="#/me/${encodeURIComponent(s.name)}">${esc(s.name)}</a></b>
+              <span class="badge ${s.role === ROLE_MANAGER ? 'info' : ''}">${esc(s.role)}</span></div>
+            <div class="muted">${blocked ? '<span class="badge bad">заблокирован</span> ' : ''}${s.hasPin ? '' : '<span class="badge work">PIN сброшен</span> '}
+              Последний вход: ${s.last ? fmtTime(s.last) : '—'}</div>
+            <div class="btns">
+              <button class="btn small ghost" data-st="reset" data-name="${esc(s.name)}">Сбросить PIN</button>
+              ${self ? '' : `<button class="btn small ghost" data-st="${blocked ? 'unblock' : 'block'}" data-name="${esc(s.name)}">${blocked ? 'Разблокировать' : 'Заблокировать'}</button>
+              <button class="btn small ghost wide" data-st="${s.role === ROLE_MANAGER ? 'agent' : 'manager'}" data-name="${esc(s.name)}">${s.role === ROLE_MANAGER ? 'Сделать агентом' : 'Сделать руководителем'}</button>`}
+            </div></div>`;
+        }).join('');
+      $app.querySelectorAll('[data-st]').forEach((b) => {
+        b.onclick = async () => {
+          const n = b.dataset.name, a = b.dataset.st;
+          const q = { reset: 'Сбросить PIN «' + n + '»?', block: 'Заблокировать «' + n + '»? Он не сможет войти.', unblock: 'Разблокировать «' + n + '»?',
+            manager: 'Сделать «' + n + '» руководителем?', agent: 'Сделать «' + n + '» агентом?' }[a];
+          if (!confirm(q)) return;
+          b.disabled = true;
+          try {
+            const list2 = await (a === 'reset' ? api.staffReset(n) : a === 'block' || a === 'unblock' ? api.staffBlock(n, a === 'block')
+              : api.staffRole(n, a === 'manager' ? ROLE_MANAGER : 'агент'));
+            toast('Готово');
+            render(list2);
+          } catch (e) { toast(e.server ? e.message : 'Нет связи', true); b.disabled = false; }
+        };
+      });
+    };
+    $app.innerHTML = '<div class="spinner">Загрузка…</div>';
+    api.staff().then(render).catch((e) => showError(e, staffView));
+  }
+
+  /* ---------- Карты (Leaflet + OpenStreetMap, подгружаются только здесь) ---------- */
+  function loadLeaflet() {
+    if (window.L) return Promise.resolve();
+    if (!loadLeaflet.p) {
+      loadLeaflet.p = new Promise((resolve, reject) => {
+        const css = document.createElement('link');
+        css.rel = 'stylesheet';
+        css.href = 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css';
+        document.head.appendChild(css);
+        const s = document.createElement('script');
+        s.src = 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js';
+        s.onload = resolve;
+        s.onerror = () => { loadLeaflet.p = null; reject(new Error('Карта не загрузилась — проверьте связь')); };
+        document.head.appendChild(s);
+      });
+    }
+    return loadLeaflet.p;
+  }
+  function newMap() {
+    const map = L.map('map');
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' }).addTo(map);
+    return map;
+  }
+  const ALMATY = [43.238, 76.889];
+
+  async function mapView(routeNo) {
+    setBar('Карта: маршрут ' + routeNo, '#/r/' + routeNo);
+    const hash = location.hash;
+    $app.innerHTML = '<div class="spinner">Загрузка карты…</div>';
+    let pts = cachedPoints(routeNo);
+    try {
+      await loadLeaflet();
+      if (!pts) pts = await loadPoints(routeNo);
+    } catch (e) { return showError(e, () => mapView(routeNo)); }
+    if (location.hash !== hash) return;
+    const colorOf = (p) => isPending(p.id) || p.status === 'выполнена' ? '#1f8a4c'
+      : p.status === 'в работе' ? (p.agent === me.agent ? '#2a3b7e' : '#f0a24a') : '#489ed7';
+    const shown = pts.filter(hasCoords);
+    $app.innerHTML = `
+      <div class="map" id="map"></div>
+      <div class="map-legend">
+        <span><i style="background:#489ed7"></i>свободна</span><span><i style="background:#2a3b7e"></i>у меня</span>
+        <span><i style="background:#f0a24a"></i>у других</span><span><i style="background:#1f8a4c"></i>выполнена</span>
+      </div>
+      <div class="muted">На карте ${shown.length} из ${pts.length} точек${pts.length - shown.length ? ' · без координат: ' + (pts.length - shown.length) : ''}</div>
+      <button class="btn ghost small" id="whereMe" style="margin-top:8px">📍 Где я</button>`;
+    const map = newMap();
+    const marks = shown.map((p) => L.circleMarker([p.lat, p.lon], { radius: 9, color: '#fff', weight: 2, fillColor: colorOf(p), fillOpacity: 0.95 })
+      .bindPopup(`<b>${p.n}. ${esc(p.name)}</b><br>${esc(cleanAddr(p.address))}<br><a href="#/p/${p.id}">Открыть точку ›</a>`).addTo(map));
+    if (marks.length) map.fitBounds(L.featureGroup(marks).getBounds().pad(0.1)); else map.setView(ALMATY, 11);
+    $('whereMe').onclick = () => locate(() => {
+      if (!ui.pos) return;
+      L.circleMarker([ui.pos.lat, ui.pos.lon], { radius: 8, color: '#fff', weight: 3, fillColor: '#c0352b', fillOpacity: 1 }).bindTooltip('Я').addTo(map);
+      map.setView([ui.pos.lat, ui.pos.lon], 14);
+    });
+  }
+
+  async function teamMapView() {
+    if (!isManager()) { location.hash = '#/'; return; }
+    setBar('Карта команды', '#/stats');
+    const hash = location.hash;
+    $app.innerHTML = '<div class="spinner">Загрузка карты…</div>';
+    let s;
+    try {
+      await loadLeaflet();
+      s = await api.stats(periodStart('day'));
+    } catch (e) { return showError(e, teamMapView); }
+    if (location.hash !== hash) return;
+    const team = s.today || [];
+    $app.innerHTML = `
+      <div class="map" id="map"></div>
+      <div class="map-legend"><span><i style="background:#2a3b7e"></i>последний визит</span><span><i style="background:#1f8a4c"></i>начало дня</span></div>
+      <div class="card">${team.length ? team.map(teamRow).join('') : '<div class="muted">Сегодня ещё никто не работал</div>'}</div>`;
+    const map = newMap();
+    const marks = [];
+    team.forEach((a) => {
+      if (a.startPos) marks.push(L.circleMarker([a.startPos.lat, a.startPos.lon], { radius: 6, color: '#fff', weight: 2, fillColor: '#1f8a4c', fillOpacity: 0.9 })
+        .bindPopup(`<b>${esc(a.name)}</b><br>Начал день ${a.start ? hm(a.start) : ''}`).addTo(map));
+      if (a.lastPos) marks.push(L.circleMarker([a.lastPos.lat, a.lastPos.lon], { radius: 9, color: '#fff', weight: 2, fillColor: '#2a3b7e', fillOpacity: 0.95 })
+        .bindTooltip(esc(a.name), { permanent: true, direction: 'top', offset: [0, -8] })
+        .bindPopup(`<b>${esc(a.name)}</b><br>${hm(a.lastPos.time)} · ${esc(a.lastPos.point || '')}<br>
+          ${a.lastPos.id ? `<a href="#/p/${esc(a.lastPos.id)}">Открыть точку ›</a> · ` : ''}<a href="#/me/${encodeURIComponent(a.name)}">Кабинет ›</a>`).addTo(map));
+    });
+    if (marks.length) map.fitBounds(L.featureGroup(marks).getBounds().pad(0.2), { maxZoom: 15 }); else map.setView(ALMATY, 11);
+  }
+
   function compress(file) {
     return new Promise((resolve, reject) => {
       const url = URL.createObjectURL(file);
@@ -1305,12 +1970,12 @@
   window.addEventListener('hashchange', route);
   window.addEventListener('online', flushOutbox);
   document.addEventListener('visibilitychange', () => {
-    if (document.hidden) return;
+    if (document.hidden) { store.set('hiddenAt', Date.now()); return; }
+    if (unlocked && Date.now() - (store.get('hiddenAt', 0) || 0) > LOCK_AFTER) return lock();
     flushOutbox();
     if (currentLoad) currentLoad();
   });
   setInterval(flushOutbox, 90000);
   if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
-  route();
-  flushOutbox();
+  faceIdAvailable().then((v) => { faceIdOk = v; }).finally(() => { route(); flushOutbox(); });
 })();
