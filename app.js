@@ -68,6 +68,10 @@
     return pad(d.getDate()) + '.' + pad(d.getMonth() + 1) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
   }
   const fmtDue = (s) => s ? s.slice(8, 10) + '.' + s.slice(5, 7) : '';
+  const plural = (n, one, few, many) => {
+    const a = Math.abs(n) % 100, b = a % 10;
+    return a > 10 && a < 20 ? many : b === 1 ? one : b >= 2 && b <= 4 ? few : many;
+  };
 
   function toast(msg, isErr) {
     const t = $('toast');
@@ -523,19 +527,88 @@
     b.hidden = !parts.length;
   }
 
-  /* ---------- Каркас ---------- */
-  function setBar(title, backHash) {
+  /* ---------- Иконки (линейные, в духе SF Symbols) ---------- */
+  const icon = (d, cls) => `<svg class="i${cls ? ' ' + cls : ''}" viewBox="0 0 24 24" aria-hidden="true">${d}</svg>`;
+  const I = {
+    home: icon('<path d="M3.5 10.5 12 3.5l8.5 7V20a1 1 0 0 1-1 1H15v-6H9v6H4.5a1 1 0 0 1-1-1z"/>'),
+    tasks: icon('<path d="M10 6h10M10 12h10M10 18h10"/><path d="m3.5 6 1.5 1.5L7.5 5M3.5 12 5 13.5 7.5 11M3.5 18 5 19.5 7.5 17"/>'),
+    team: icon('<path d="M4 20V11M10 20V5M16 20v-6M22 20H2"/>'),
+    person: icon('<circle cx="12" cy="8" r="4"/><path d="M4 21c.5-4 4-6 8-6s7.5 2 8 6"/>'),
+    map: icon('<path d="m9 4-6 2.2v14L9 18l6 2 6-2.2v-14L15 6z"/><path d="M9 4v14M15 6v14"/>'),
+    pin: icon('<path d="M12 21.5s7-6.9 7-11.5a7 7 0 0 0-14 0c0 4.6 7 11.5 7 11.5z"/><circle cx="12" cy="10" r="2.5"/>'),
+    car: icon('<path d="M4 16.5V12l2-5.5h12L20 12v4.5"/><path d="M3 16.5h18v2H3zM4 12h16"/><circle cx="7.5" cy="14.3" r=".6"/><circle cx="16.5" cy="14.3" r=".6"/>'),
+    phone: icon('<path d="M5.5 3.5h3.5l1.8 4.6-2.3 1.4a11 11 0 0 0 6 6l1.4-2.3 4.6 1.8v3.5a2 2 0 0 1-2.1 2A17 17 0 0 1 3.5 5.6a2 2 0 0 1 2-2.1z"/>'),
+    chat: icon('<path d="M20.5 11.5a8.5 8.5 0 0 1-12.4 7.6L3.5 20.5l1.4-4.4a8.5 8.5 0 1 1 15.6-4.6z"/>'),
+    plus: icon('<path d="M12 5v14M5 12h14"/>'),
+    repeat: icon('<path d="M17 2.5 20.5 6 17 9.5"/><path d="M3.5 11V9.5A3.5 3.5 0 0 1 7 6h13.5M7 21.5 3.5 18 7 14.5"/><path d="M20.5 13v1.5A3.5 3.5 0 0 1 17 18H3.5"/>'),
+    edit: icon('<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="m13.5 6.5 4 4"/>'),
+    trash: icon('<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>'),
+    clock: icon('<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/>'),
+    play: icon('<path d="M7 4.5v15l12-7.5z"/>'),
+    stop: icon('<rect x="5.5" y="5.5" width="13" height="13" rx="2"/>'),
+    target: icon('<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1"/>'),
+    key: icon('<circle cx="8" cy="15" r="4.5"/><path d="m11.2 11.8 9.3-9.3M17 6l3 3M14.5 8.5l2 2"/>'),
+    face: icon('<path d="M4 8V5.5A1.5 1.5 0 0 1 5.5 4H8M16 4h2.5A1.5 1.5 0 0 1 20 5.5V8M20 16v2.5a1.5 1.5 0 0 1-1.5 1.5H16M8 20H5.5A1.5 1.5 0 0 1 4 18.5V16"/><path d="M9 9.5v1M15 9.5v1M12 9.5v3.5h-1M9 16a4.5 4.5 0 0 0 6 0"/>'),
+    shield: icon('<path d="M12 3 4.5 6v6c0 4.5 3.2 7.8 7.5 9 4.3-1.2 7.5-4.5 7.5-9V6z"/>'),
+    logout: icon('<path d="M15 4h3.5A1.5 1.5 0 0 1 20 5.5v13a1.5 1.5 0 0 1-1.5 1.5H15M10 8l-4 4 4 4M6 12h10"/>'),
+    camera: icon('<path d="M3.5 8.5A1.5 1.5 0 0 1 5 7h2.5L9 4.5h6L16.5 7H19a1.5 1.5 0 0 1 1.5 1.5v9.5A1.5 1.5 0 0 1 19 19.5H5A1.5 1.5 0 0 1 3.5 18z"/><circle cx="12" cy="13" r="3.5"/>'),
+    check: icon('<path d="m5 12.5 4.5 4.5L19 7.5"/>'),
+    users: icon('<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c.4-3.6 3.2-5.5 6.5-5.5s6.1 1.9 6.5 5.5"/><path d="M15.5 4.8a3.5 3.5 0 0 1 0 6.4M17.5 14.8c2.2.6 3.7 2.4 4 5.2"/>'),
+    chev: icon('<path d="m9 5 7 7-7 7"/>', 'chev'),
+  };
+  const chev = I.chev;
+
+  // Кольцо прогресса (как кольца активности на Apple Watch)
+  function ring(pct, size) {
+    const p = Math.max(0, Math.min(100, pct));
+    return `<svg class="ring${p >= 100 ? ' full' : ''}" width="${size}" height="${size}" viewBox="0 0 36 36" aria-label="${p}%">
+      <circle class="track" cx="18" cy="18" r="15.5" fill="none" stroke-width="4"/>
+      <circle class="val" cx="18" cy="18" r="15.5" fill="none" stroke-width="4" stroke-linecap="round"
+        stroke-dasharray="${(p * 97.4 / 100).toFixed(1)} 97.4" transform="rotate(-90 18 18)"/>
+      <text x="18" y="21" text-anchor="middle">${p}%</text></svg>`;
+  }
+
+  /* ---------- Каркас: навигационная панель, большой заголовок, вкладки ---------- */
+  // backHash — экран «внутри» раздела (стрелка назад); без него — раздел с большим заголовком.
+  // action — кнопка справа: { icon, href, label }.
+  function setBar(title, backHash, action) {
+    const authed = !!(me.token && unlocked);
+    const large = !backHash && authed;
+    document.body.classList.toggle('large', large);
     $('title').textContent = title;
+    $('ltitle').textContent = title;
+    $('ltitle').hidden = !large;
     const back = $('back');
     back.hidden = !backHash;
     back.onclick = () => { location.hash = backHash; };
-    $('logo').hidden = !!backHash;
-    const who = $('who');
-    who.hidden = !(me.token && unlocked);
-    who.textContent = '👤 ' + me.agent + (isManager() ? ' · рук.' : '');
+    $('logo').hidden = !!backHash || !authed;
+    const a = $('action');
+    a.hidden = !action;
+    if (action) { a.innerHTML = action.icon; a.href = action.href; a.setAttribute('aria-label', action.label); }
+    updateTabbar();
+    onScroll();
   }
 
-  $('who').onclick = () => { location.hash = '#/me'; };
+  function onScroll() { document.body.classList.toggle('scrolled', window.scrollY > 36); }
+  window.addEventListener('scroll', onScroll, { passive: true });
+
+  function updateTabbar() {
+    const tb = $('tabbar');
+    const authed = !!(me.token && unlocked);
+    tb.hidden = !authed;
+    document.body.classList.toggle('has-tabbar', authed);
+    if (!authed) return;
+    const h = location.hash.replace(/^#\/?/, '');
+    const cur = /^(tasks|td\/)/.test(h) ? 'tasks'
+      : /^(stats|staff|teammap)/.test(h) || (/^me\/./.test(h) && isManager()) ? 'stats'
+      : /^(me|pin)/.test(h) ? 'me' : 'home';
+    const c = cache.tasks ? taskCounts(cache.tasks) : null;
+    const tabs = [['home', '#/', 'Сегодня', I.home], ['tasks', '#/tasks', 'Задания', I.tasks]]
+      .concat(isManager() ? [['stats', '#/stats', 'Команда', I.team]] : [])
+      .concat([['me', '#/me', 'Профиль', I.person]]);
+    tb.innerHTML = tabs.map((t) => `<a href="${t[1]}" class="${cur === t[0] ? 'on' : ''}">${t[3]}${t[2]}
+      ${t[0] === 'tasks' && c && c.mine + c.free ? `<span class="tb-badge">${c.mine + c.free}</span>` : ''}</a>`).join('');
+  }
 
   function stopRefresh() { clearInterval(refreshTimer); refreshTimer = null; currentLoad = null; }
 
@@ -855,6 +928,7 @@
     const ts = await api.tasks();
     cache.tasks = ts;
     store.set('cache:tasks', ts);
+    updateTabbar();
     return ts;
   }
   function updateCachedTask(t) {
@@ -865,30 +939,38 @@
   }
 
   function homeView() {
-    setBar('Маршруты');
+    setBar('Сегодня');
     const isHome = () => location.hash.replace(/^#\/?/, '') === '';
-    const navHtml = () => {
+    const dateLine = new Date().toLocaleDateString('ru-RU', { weekday: 'long', day: 'numeric', month: 'long' });
+    const tasksRow = () => {
       const c = cache.tasks ? taskCounts(cache.tasks) : null;
-      return goalCard(cache.me['|day']) + `<a class="card nav-card" href="#/tasks">
-          <div class="row"><h2 class="grow">📋 Задания</h2><span class="muted">›</span></div>
-          <div class="stats">${c ? `<span>Свободных <b>${c.free}</b></span><span>Мои <b>${c.mine}</b></span>` +
-            (c.overdue ? `<span class="bad">Просрочено <b>${c.overdue}</b></span>` : '') : '<span>Загрузка…</span>'}</div>
-        </a>` +
-        (isManager() ? `<a class="card nav-card mgr" href="#/stats">
-          <div class="row"><h2 class="grow">📊 Статистика команды</h2><span class="muted">›</span></div>
-          <div class="muted">Визиты, задания и лента действий агентов</div></a>` : '');
+      if (!c) return '';
+      return `<div class="list">
+        <a class="row-item has-icon" href="#/tasks"><span class="ri-icon">${I.tasks}</span>
+          <span class="grow"><span class="ri-title">Задания</span>
+            <span class="ri-sub" style="display:block">Свободных ${c.free} · мои ${c.mine}${c.overdue ? ` · <b style="color:var(--bad)">просрочено ${c.overdue}</b>` : ''}</span></span>${chev}</a>
+      </div>`;
     };
     const render = (routes) => {
-      $app.innerHTML = navHtml() + '<div class="section-title">Маршруты</div>' + (routes ? routes.map((r) => {
-        const pd = r.total ? (r.done / r.total) * 100 : 0;
-        const pw = r.total ? (r.work / r.total) * 100 : 0;
-        return `<a class="card route-card" href="#/r/${r.route}">
-          <div class="row"><h2 class="grow">Маршрут ${r.route}</h2><span class="muted">${r.total} точек</span></div>
-          ${r.title ? `<div class="muted">${esc(r.title)}</div>` : ''}
-          <div class="progress"><div class="done" style="width:${pd}%"></div><div class="work" style="width:${pw}%"></div></div>
-          <div class="stats"><span>Выполнено <b>${r.done}</b></span><span>В работе <b>${r.work}</b></span><span>Свободно <b>${r.free}</b></span></div>
-        </a>`;
-      }).join('') + '<p class="muted" style="text-align:center">Старт: Алматы, Казыбаева 20</p>' : '<div class="spinner">Загрузка…</div>');
+      $app.innerHTML = `<div class="subtitle">${esc(me.agent.split(' ')[0])} · ${esc(dateLine)}</div>` +
+        goalCard(cache.me['|day']) + tasksRow() +
+        '<div class="section-title">Маршруты</div>' + (routes ? '<div class="list">' + routes.map((r) => {
+          const pd = r.total ? (r.done / r.total) * 100 : 0;
+          const pw = r.total ? (r.work / r.total) * 100 : 0;
+          return `<a class="row-item" href="#/r/${r.route}">
+            <span class="grow"><span class="ri-title">Маршрут ${r.route}</span>
+              ${r.title ? `<span class="ri-sub" style="display:block">${esc(r.title)}</span>` : ''}
+              <span class="progress" style="display:flex"><span class="done" style="width:${pd}%"></span><span class="work" style="width:${pw}%"></span></span>
+              <span class="ri-sub">Выполнено ${r.done} из ${r.total}${r.work ? ' · в работе ' + r.work : ''}</span></span>
+            ${chev}</a>`;
+        }).join('') + '</div><p class="muted" style="text-align:center">Старт: Алматы, Казыбаева 20</p>' : '<div class="spinner">Загрузка…</div>');
+      if ($('homeDay')) $('homeDay').onclick = async (ev) => {
+        ev.target.disabled = true;
+        ev.target.textContent = 'Определяем местоположение…';
+        try { await api.dayStart(await getGeo()); toast('Рабочий день начат'); } catch (e) { toast(e.server ? e.message : 'Нет связи', true); }
+        cache.me = {};
+        loadMe('day', '').then(() => { if (isHome()) render(cache.summary); }).catch(() => {});
+      };
     };
     render(cache.summary);
     const load = () => {
@@ -916,8 +998,9 @@
   const cachedPoints = (routeNo) => cache.points[routeNo] || store.get('cache:points:' + routeNo, null);
 
   function listView(routeNo) {
-    setBar('Маршрут ' + routeNo, '#/');
+    setBar('Маршрут ' + routeNo, '#/', { icon: I.map, href: '#/map/' + routeNo, label: 'Карта маршрута' });
     const hash = location.hash;
+    const group = (items) => '<div class="list">' + items.map(itemHtml).join('') + '</div>';
 
     const itemHtml = (p) => {
       const mine = p.status === 'в работе' && p.agent === me.agent;
@@ -926,13 +1009,13 @@
       else if (p.status === 'выполнена') badge = `<span class="badge done">✓ ${esc(p.agent)}</span>`;
       else if (mine) badge = '<span class="badge work">у вас в работе</span>';
       else if (p.status === 'в работе') badge = `<span class="badge work">взял(а): ${esc(p.agent)}</span>`;
-      if (p.visits > 1) badge += `<span class="badge info">🔁 ${p.visits}</span>`;
+      if (p.visits > 1) badge += `<span class="badge info">${p.visits} ${plural(p.visits, 'визит', 'визита', 'визитов')}</span>`;
       const dist = ui.pos && hasCoords(p) ? `<span class="dist">${km(ui.pos, p).toFixed(1)} км</span>` : '';
-      return `<a class="card point${mine ? ' mine' : ''}" href="#/p/${p.id}">
+      return `<a class="row-item point${mine ? ' mine' : ''}" href="#/p/${p.id}">
         <span class="num">${p.n}</span>
         <span class="grow"><div class="name">${esc(p.name)}</div>
           <div class="addr">${esc(p.type)}${p.type ? ' · ' : ''}${esc(cleanAddr(p.address))}</div>${badge}</span>
-        ${dist}</a>`;
+        ${dist}${chev}</a>`;
     };
 
     const render = (pts) => {
@@ -953,7 +1036,6 @@
       $app.innerHTML = `
         <div class="tools">
           <input class="search" id="q" type="search" placeholder="Поиск по названию или адресу" value="${esc(ui.q)}">
-          <a class="btn ghost small" href="#/map/${routeNo}" style="flex:1 1 100%">🗺 Точки маршрута на карте</a>
           <div class="seg"><button data-sort="order" class="${ui.sort === 'order' ? 'on' : ''}">По порядку</button>
             <button data-sort="near" class="${ui.sort === 'near' ? 'on' : ''}">Ближайшие</button></div>
         </div>
@@ -963,11 +1045,11 @@
           <button data-tab="done" class="${ui.tab === 'done' ? 'on' : ''}">Выполнено<b>${done.length}</b></button>
         </div>
         ${ui.tab === 'free' ? `
-          ${mine.length ? '<div class="section-title">У меня в работе</div>' + mine.map(itemHtml).join('') : ''}
+          ${mine.length ? '<div class="section-title">У меня в работе</div>' + group(mine) : ''}
           <div class="section-title">Свободные</div>
-          ${free.length ? free.map(itemHtml).join('') : '<div class="empty">Свободных точек нет</div>'}` : ''}
-        ${ui.tab === 'taken' ? (taken.length ? taken.map(itemHtml).join('') : '<div class="empty">Нет точек, занятых другими</div>') : ''}
-        ${ui.tab === 'done' ? (done.length ? done.map(itemHtml).join('') : '<div class="empty">Выполненных точек пока нет</div>') : ''}`;
+          ${free.length ? group(free) : '<div class="empty">Свободных точек нет</div>'}` : ''}
+        ${ui.tab === 'taken' ? (taken.length ? group(taken) : '<div class="empty">Нет точек, занятых другими</div>') : ''}
+        ${ui.tab === 'done' ? (done.length ? group(done) : '<div class="empty">Выполненных точек пока нет</div>') : ''}`;
 
       const qi = $('q');
       qi.oninput = () => { ui.q = qi.value; render(pts); };
@@ -1082,7 +1164,7 @@
       box.innerHTML = history.length ? '<ul class="history">' + history.slice().reverse().map((v) => `<li>
           <b>Визит ${v.visit}</b> · ${esc(v.time)} · ${esc(v.agent)}
           ${v.interest ? `<div class="muted">Интерес: ${esc(v.interest)}${v.distance !== '' && v.distance != null
-            ? ` · ${v.distance > FAR_METERS ? '⚠️ ' : ''}${esc(v.distance)} м от точки` : v.gps ? ' · 📍 GPS отмечен' : ' · без GPS'}</div>` : ''}
+            ? ` · ${v.distance > FAR_METERS ? '⚠️ ' : ''}${esc(v.distance)} м от точки` : v.gps ? ' · GPS отмечен' : ' · без GPS'}</div>` : ''}
           ${v.nextStep ? `<div>${esc(v.nextStep)}</div>` : ''}
         </li>`).join('') + '</ul>' : '<div class="muted">Визитов нет</div>';
     }
@@ -1108,35 +1190,34 @@
       // Телефоны точки (если есть в базе) подставляются в анкету по умолчанию
       const known = { phone: p.phone || '', whatsapp: p.whatsapp || '' };
       const d = (k) => esc(src[k] != null ? src[k] : (known[k] || ''));
-      const contacts = [
-        p.phone ? `<a href="tel:${esc(telDigits(p.phone))}">📞 ${esc(p.phone)}</a>` : '',
-        waUrl(p.whatsapp) ? `<a href="${waUrl(p.whatsapp)}" target="_blank" rel="noopener">💬 WhatsApp</a>` : '',
-      ].filter(Boolean).join(' &nbsp; ');
       const formTitle = editing ? 'Изменение анкеты' : revisit ? 'Новый визит' : 'Анкета точки';
+      // Быстрые действия, как в «Контактах» iPhone: маршрут, звонок, WhatsApp, карточка 2ГИС
+      const quick = [
+        `<button class="qa main" id="go">${I.car}<span>Маршрут</span></button>`,
+        p.phone ? `<a class="qa" href="tel:${esc(telDigits(p.phone))}">${I.phone}<span>Позвонить</span></a>` : '',
+        waUrl(p.whatsapp) ? `<a class="qa" href="${waUrl(p.whatsapp)}" target="_blank" rel="noopener">${I.chat}<span>WhatsApp</span></a>` : '',
+        `<a class="qa" href="${gisSearchUrl(p)}" target="_blank" rel="noopener">${I.pin}<span>2ГИС</span></a>`,
+      ].join('');
       $app.innerHTML = `
-        <div class="card">
-          <div class="muted">№ ${p.n} · ${esc(p.type)}</div>
+        <div class="card point-head">
+          <div class="muted">№ ${p.n}${p.type ? ' · ' + esc(p.type) : ''}</div>
           <h2>${esc(p.name)}</h2>
-          <div>${esc(p.address)}</div>
-          ${contacts ? `<div style="margin-top:6px">${contacts}</div>` : ''}
-          <div class="btns">
-            <button class="btn primary wide" id="go">🚗 Маршрут в 2ГИС</button>
-            <a class="btn ghost${routable(p) ? '' : ' wide'}" href="${gisSearchUrl(p)}" target="_blank" rel="noopener">Найти в 2ГИС</a>
-            ${routable(p) ? `<a class="btn ghost" href="${gisRouteWebUrl(p)}" target="_blank" rel="noopener">Маршрут на сайте</a>` : ''}
-          </div>
-          ${routable(p) ? '' : '<div class="muted">2ГИС откроет карточку фирмы — нажмите там «Проехать».</div>'}
+          <div class="addr">${esc(p.address)}</div>
+          ${p.phone ? `<div class="addr">${esc(p.phone)}</div>` : ''}
+          <div class="quick">${quick}</div>
+          ${routable(p) ? '' : '<div class="muted" style="font-size:13px">«Маршрут» откроет карточку фирмы в 2ГИС — нажмите там «Проехать».</div>'}
           ${status}
           ${!done && !other && !pending ? (mine
             ? '<button class="btn ghost" id="release">Отказаться от точки</button>'
-            : '<button class="btn" id="claim">Беру в работу</button>') : ''}
+            : `<button class="btn primary" id="claim">${I.check} Беру в работу</button>`) : ''}
           ${ownDone && !editing && !revisit ? `<div class="btns">
-            <a class="btn blue wide" href="#/give/${id}">📋 Дать задание</a>
-            <button class="btn wide" id="revisit">🔁 Новый визит</button>
-            <button class="btn ghost" id="edit">✏️ Изменить</button>
-            <button class="btn ghost" id="remove">🗑 Удалить</button></div>
+            <a class="btn primary wide" href="#/give/${id}">${I.plus} Дать задание</a>
+            <button class="btn wide" id="revisit">${I.repeat} Новый визит</button>
+            <button class="btn ghost" id="edit">${I.edit} Изменить</button>
+            <button class="btn danger" id="remove">${I.trash} Удалить</button></div>
             <button class="link-btn" id="hist">${history ? 'Скрыть историю' : 'История визитов (' + (p.visits || 1) + ')'}</button>
             <div id="histbox"></div>` : ''}
-          ${!done && !pending ? `<a class="btn ghost" href="#/give/${id}" style="margin-top:8px">📋 Дать задание</a>` : ''}
+          ${!done && !pending ? `<a class="btn" href="#/give/${id}" style="margin-top:8px">${I.plus} Дать задание</a>` : ''}
         </div>
         <div id="ptasks"></div>
         ${canFill ? `
@@ -1160,11 +1241,11 @@
             <div class="muted" style="margin-top:4px">Появится в «Моих делах» в этот день</div></div>
           <div class="field"><label>Комментарий</label><textarea name="comment">${d('comment')}</textarea></div>
           <div class="field"><span class="label">Фото витрины</span>
-            <label class="btn ghost file-btn">📷 Добавить фото<input type="file" id="photo" accept="image/*" multiple></label>
+            <label class="btn file-btn">${I.camera} Добавить фото<input type="file" id="photo" accept="image/*" multiple></label>
             ${editing && editing.photoCount ? `<div class="muted">Уже загружено фото: ${editing.photoCount}. Новые добавятся к ним.</div>` : ''}
             <div class="photos" id="photos"></div></div>
-          ${editing ? '' : '<p class="muted">📍 При отправке отметится ваше местоположение — так видно, что визит был на точке.</p>'}
-          <button class="btn ok" type="submit" id="submit">${editing ? '💾 Сохранить изменения' : '✓ Выполнено — отправить'}</button>
+          ${editing ? '' : '<p class="muted" style="font-size:13px">При отправке отметится ваше местоположение — так видно, что визит был на точке.</p>'}
+          <button class="btn ok" type="submit" id="submit">${editing ? 'Сохранить изменения' : '✓ Выполнено — отправить'}</button>
           ${editing || revisit ? '<button class="btn ghost" type="button" id="cancelEdit" style="margin-top:8px">Отмена</button>' : ''}
         </form>` : ''}`;
 
@@ -1264,14 +1345,14 @@
         } catch (e) {
           toast(e.server ? e.message : 'Нет связи, изменения не сохранены', true);
           btn.disabled = false;
-          btn.textContent = '💾 Сохранить изменения';
+          btn.textContent = 'Сохранить изменения';
           return;
         }
         if (location.hash === hash) renderPoint();
         return;
       }
       btn.disabled = true;
-      btn.textContent = '📍 Определяем местоположение…';
+      btn.textContent = 'Определяем местоположение…';
       // uid защищает от двойного визита, если ответ сервера потерялся и анкета ушла повторно из очереди
       form.uid = id + '-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
       form.geo = await getGeo();
@@ -1365,7 +1446,7 @@
           <textarea name="c${i}" placeholder="Комментарий к заданию"></textarea></div>`).join('')}
         <div class="field" style="margin-top:14px"><label for="due">Срок выполнения</label>
           <input type="date" id="due" name="due" value="${due}" min="${today()}"></div>
-        <button class="btn primary" type="submit" id="gsubmit">📋 Дать задание</button>
+        <button class="btn primary" type="submit" id="gsubmit">${I.plus} Дать задание</button>
       </form>`;
     const f = $('gf');
     f.querySelectorAll('input[name=type]').forEach((cb) => {
@@ -1387,7 +1468,7 @@
       } catch (e) {
         toast(e.server ? e.message : 'Нет связи, попробуйте ещё раз', true);
         btn.disabled = false;
-        btn.textContent = '📋 Дать задание';
+        btn.innerHTML = I.plus + ' Дать задание';
       }
     };
   }
@@ -1421,7 +1502,7 @@
       ? ` <a href="${esc(u)}" target="_blank" rel="noopener">📷 фото ${i + 1}</a>` : ` 📷 ${esc(u)}`).join('');
     return `<div class="card task${od ? ' overdue' : ''}">
       <div class="type">${esc(t.type)}</div>
-      ${opts.noPoint ? '' : `<a class="task-link" href="#/p/${esc(t.point)}">📍 ${esc(t.name)}</a>
+      ${opts.noPoint ? '' : `<a class="task-link" href="#/p/${esc(t.point)}">${esc(t.name)} ›</a>
         <div class="meta">${esc(cleanAddr(t.address))}</div>`}
       ${t.comment ? `<div class="comment">💬 ${esc(t.comment)}</div>` : ''}
       <div class="meta">Выдал(а) ${esc(t.author)} · ${fmtTime(t.created)}${t.due
@@ -1454,7 +1535,7 @@
   }
 
   function tasksView() {
-    setBar('Задания', '#/');
+    setBar('Задания');
     const hash = location.hash;
     const tabs = [['free', 'Свободные'], ['mine', 'Мои'], ['done', 'Выполнено']].concat(isManager() ? [['all', 'Все']] : []);
     if (!tabs.some((t) => t[0] === ui.ttab)) ui.ttab = 'free';
@@ -1500,7 +1581,7 @@
         <div class="tools"><input class="search" id="tq" type="search" placeholder="Поиск по точке, заданию, агенту" value="${esc(ui.tq)}"></div>
         <div class="seg tabs">${tabs.map((t) => `<button data-ttab="${t[0]}" class="${ui.ttab === t[0] ? 'on' : ''}">${t[1]}<b>${counts[t[0]]}</b></button>`).join('')}</div>
         <div id="tlist">${body}</div>
-        <p class="muted" style="text-align:center">Задание выдаётся на карточке точки: «📋 Дать задание».</p>`;
+        <p class="muted" style="text-align:center">Задание выдаётся на карточке точки: «Дать задание».</p>`;
       const qi = $('tq');
       qi.oninput = () => { ui.tq = qi.value; render(ts); };
       if (searchFocused) { qi.focus(); qi.setSelectionRange(caret, caret); }
@@ -1541,7 +1622,7 @@
         <div class="field"><label>Результат <span class="req">*</span></label>
           <textarea name="result" placeholder="Например: провёл встречу с командой, выставили Alina Paint на полку, договорились о заказе">${esc(store.get(draftKey, ''))}</textarea></div>
         <div class="field"><span class="label">Фото результата</span>
-          <label class="btn ghost file-btn">📷 Добавить фото<input type="file" id="tphoto" accept="image/*" multiple></label>
+          <label class="btn file-btn">${I.camera} Добавить фото<input type="file" id="tphoto" accept="image/*" multiple></label>
           <div class="photos" id="tphotos"></div></div>
         <button class="btn ok" type="submit" id="tsubmit">✓ Задание выполнено</button>
       </form>` : '<div class="empty">Это задание закрыть нельзя: ' + esc(t.status === 'в работе' ? 'его выполняет ' + t.assignee : 'оно ' + t.status) + '</div>');
@@ -1572,7 +1653,7 @@
   /* ---------- Статистика (руководитель) ---------- */
   function statsView() {
     if (!isManager()) { location.hash = '#/'; return; }
-    setBar('Статистика', '#/');
+    setBar('Команда');
     const hash = location.hash;
     const periods = [['today', 'Сегодня'], ['7', '7 дней'], ['30', '30 дней'], ['all', 'Всё время']];
     const fromOf = (k) => {
@@ -1591,9 +1672,10 @@
       $app.innerHTML = `
         <div class="section-title">Сегодня по команде</div>
         <div class="card">${(s.today || []).length ? s.today.map(teamRow).join('') : '<div class="muted">Сотрудники ещё не входили</div>'}</div>
-        <div class="btns" style="margin-top:0">
-          <a class="btn ghost small" href="#/teammap">🗺 Карта команды</a>
-          <a class="btn ghost small" href="#/staff">👥 Сотрудники</a>
+        <div class="list">
+          <a class="row-item has-icon" href="#/teammap"><span class="ri-icon" style="background:var(--ok)">${I.map}</span><span class="grow">Карта команды</span>${chev}</a>
+          <a class="row-item has-icon" href="#/staff"><span class="ri-icon" style="background:#8e8e93">${I.users}</span><span class="grow">Сотрудники</span>${chev}</a>
+          <a class="row-item has-icon" href="#/tasks" id="allTasks"><span class="ri-icon">${I.tasks}</span><span class="grow">Все задания команды</span>${chev}</a>
         </div>
         <div class="section-title">За период</div>
         <div class="seg tabs" style="margin-bottom:10px">${periods.map((p) =>
@@ -1616,7 +1698,6 @@
             <td class="${a.far ? 'bad' : ''}">${a.far}</td><td>${a.issued}</td><td>${a.taken}</td><td>${a.done}</td>
             <td>${a.inWork}</td><td class="${a.overdue ? 'bad' : ''}">${a.overdue}</td><td>${fmtTime(a.last)}</td></tr>`).join('')}
         </table></div>` : '<div class="muted">За этот период действий нет</div>'}</div>
-        <a class="btn ghost" href="#/tasks" id="allTasks" style="margin-bottom:10px">📋 Все задания команды</a>
         <div class="section-title">Лента действий</div>
         <div class="card">${s.feed.length ? '<ul class="feed">' + s.feed.map((e) =>
           `<li><time>${fmtTime(e.time)}</time><b>${esc(e.agent)}</b> ${esc(e.action)}${e.details ? ' — ' + esc(e.details) : ''}${pointLink(e.id)}</li>`).join('') +
@@ -1669,19 +1750,22 @@
     if (!m) return '';
     const t = m.today;
     const pct = goalPct(t);
-    return `<a class="card nav-card goal-card" href="#/me">
-      ${t.goal ? `<div class="row"><b class="grow">🎯 Цель дня: ${t.visits} из ${t.goal} точек</b><b>${pct}%</b></div>${goalBar(t)}
-        ${pct >= 100 ? '<div class="muted">🎉 Цель выполнена!</div>' : ''}`
-        : '<div class="row"><b class="grow">🎯 Поставьте цель на день</b><span class="muted">›</span></div>'}
-      ${t.start ? '' : '<div class="muted">▶️ Рабочий день не начат — начните в кабинете</div>'}
-    </a>`;
+    return `<div class="card goal-card">
+      <a class="goal-main" href="#/me">${ring(pct, 76)}
+        <span class="grow"><span class="goal-num" style="display:block">${t.visits}<span> / ${t.goal || '—'} точек</span></span>
+          <span class="muted">${t.goal ? (pct >= 100 ? 'Цель дня выполнена 🎉' : 'Цель дня · осталось ' + Math.max(0, t.goal - t.visits))
+            : 'Нажмите, чтобы поставить цель на день'}</span></span>${chev}</a>
+      ${!t.start ? `<button class="btn primary" id="homeDay">${I.play} Начать рабочий день</button>`
+        : `<div class="day-line muted">${I.clock} ${esc(dayText(t))}</div>`}
+    </div>`;
   }
 
   // Строка агента в блоке «Сегодня» у руководителя
   function teamRow(a) {
     const pct = goalPct(a);
     return `<a class="team-row" href="#/me/${encodeURIComponent(a.name)}">
-      <div class="row"><b class="grow">${esc(a.name)}</b><span class="muted">${esc(dayText(a))}</span></div>
+      <div class="row"><b class="grow">${esc(a.name)}</b>${chev}</div>
+      <div class="muted" style="font-size:13px">${esc(dayText(a))}</div>
       ${goalBar(a, true)}
       <div class="muted">${a.goal ? `${a.visits} из ${a.goal} точек · ${pct}%${pct >= 100 ? ' 🎉' : ''}` : `${a.visits} визитов · цель не поставлена`}</div>
     </a>`;
@@ -1691,7 +1775,7 @@
     const own = !who || who === me.agent;
     if (!own && !isManager()) { location.hash = '#/me'; return; }
     who = own ? '' : who;
-    setBar(own ? 'Мой кабинет' : who, own ? '#/' : '#/stats');
+    if (own) setBar('Профиль'); else setBar(who, '#/stats');
     const hash = location.hash;
     const periods = [['day', 'День'], ['week', 'Неделя'], ['month', 'Месяц']];
     let goalEdit = false;
@@ -1711,28 +1795,29 @@
       const initials = m.name.split(' ').map((w) => w[0]).slice(0, 2).join('').toUpperCase();
       const tile = (v, label, bad) => `<div class="tile${bad && v ? ' bad' : ''}"><b>${v}</b><span>${label}</span></div>`;
       $app.innerHTML = `
-        <div class="card profile">
+        <div class="profile">
           <div class="avatar">${esc(initials)}</div>
-          <div class="grow"><h2>${esc(m.name)}</h2><span class="badge ${m.role === ROLE_MANAGER ? 'info' : ''}">${esc(m.role)}</span></div>
+          <h2>${esc(m.name)}</h2><span class="badge ${m.role === ROLE_MANAGER ? 'info' : ''}">${esc(m.role)}</span>
         </div>
         <div class="section-title">Сегодня</div>
         <div class="card">
-          <div class="row"><h3 class="grow">🎯 Цель дня</h3>
+          <div class="row"><h3 class="grow">${I.target} Цель дня</h3>
             ${own && t.goal && !goalEdit ? '<button class="link-btn inline" id="goalEdit">Изменить</button>' : ''}</div>
-          ${t.goal && !goalEdit ? `${goalBar(t)}
-            <div class="goal-text"><b>${t.visits} из ${t.goal}</b> точек · <b>${pct}%</b>${pct >= 100 ? ' · 🎉 Цель выполнена' : ''}</div>`
-            : own ? `<p class="muted" style="margin:0 0 8px">Сколько точек объедете сегодня? Каждый отправленный визит двигает шкалу — её видит руководитель.</p>
+          ${t.goal && !goalEdit ? `<div class="goal-main">${ring(pct, 76)}
+              <div class="grow"><div class="goal-num">${t.visits}<span> / ${t.goal} точек</span></div>
+              <div class="muted">${pct >= 100 ? 'Цель выполнена 🎉' : 'Осталось ' + Math.max(0, t.goal - t.visits) + ' ' + plural(Math.max(0, t.goal - t.visits), 'точка', 'точки', 'точек')}</div></div></div>`
+            : own ? `<p class="muted" style="margin:0 0 8px">Сколько точек объедете сегодня? Каждый отправленный визит заполняет кольцо — его видит руководитель.</p>
               <div class="goal-pick">${[5, 10, 15, 20].map((n) => `<button class="btn small" data-goal="${n}">${n}</button>`).join('')}</div>
               <div class="goal-own"><div class="field" style="margin:0"><input type="text" inputmode="numeric" id="goalOwn" placeholder="Своё число"></div>
                 <button class="btn small primary" id="goalSave">OK</button></div>`
             : '<div class="muted">Цель не поставлена</div>'}
         </div>
         <div class="card">
-          <h3>🕘 Рабочий день</h3>
-          <div class="muted" style="margin-bottom:8px">${esc(dayText(t))}</div>
-          ${own ? (!t.start ? '<button class="btn primary" id="dayStart">▶️ Начать рабочий день</button>'
-            : !t.end ? '<button class="btn ghost" id="dayEnd">⏹ Закончить рабочий день</button>'
-            : '<button class="btn ghost" id="dayStart">▶️ Продолжить день</button>') : ''}
+          <h3>${I.clock} Рабочий день</h3>
+          <div class="muted" style="margin-bottom:10px">${esc(dayText(t))}</div>
+          ${own ? (!t.start ? `<button class="btn primary" id="dayStart">${I.play} Начать рабочий день</button>`
+            : !t.end ? `<button class="btn danger" id="dayEnd">${I.stop} Закончить рабочий день</button>`
+            : `<button class="btn" id="dayStart">${I.play} Продолжить день</button>`) : ''}
         </div>
         <div class="section-title">Статистика</div>
         <div class="seg tabs" style="margin-bottom:10px">${periods.map((x) =>
@@ -1751,19 +1836,22 @@
               ${x.nextStep ? `<div class="muted">${esc(x.nextStep)}</div>` : ''}</a>`).join('')}
           </div>`).join('')
           : '<div class="card muted">Дел нет. Дату следующего шага можно поставить в анкете визита.</div>'}
-        ${own ? `<a class="btn ghost" href="#/tasks" id="myTasks" style="margin-bottom:10px">📋 Мои задания</a>` : ''}
+        ${own ? `<div class="list"><a class="row-item has-icon" href="#/tasks" id="myTasks"><span class="ri-icon">${I.tasks}</span>
+          <span class="grow ri-title">Мои задания</span>${chev}</a></div>` : ''}
         ${!own && m.feed.length ? `<div class="section-title">Последние действия</div><div class="card"><ul class="feed">${m.feed.map((e) =>
           `<li><time>${fmtTime(e.time)}</time>${esc(e.action)}${e.details ? ' — ' + esc(e.details) : ''}</li>`).join('')}</ul></div>` : ''}
-        ${own ? `<div class="section-title">Настройки</div>
-          <div class="card">
-            ${faceIdOk ? `<div class="row" style="margin-bottom:10px"><span class="grow">Вход по Face ID</span>
-              <button class="btn small ${faceIdOn() ? 'ghost' : 'primary'}" id="faceToggle" style="width:auto">${faceIdOn() ? 'Выключить' : 'Включить'}</button></div>` : ''}
-            <a class="btn ghost" href="#/pin" style="margin-bottom:8px">🔑 Сменить PIN</a>
-            ${m.role !== ROLE_MANAGER ? `<details class="mgr"><summary>Я руководитель</summary>
-              <div class="goal-own"><div class="field" style="margin:0"><input type="password" inputmode="numeric" id="mcode" autocomplete="off" placeholder="Код руководителя"></div>
-              <button class="btn small primary" id="mgrSave">OK</button></div></details>` : ''}
-            <button class="btn ghost" id="logout" style="margin-top:8px">Выйти</button>
-          </div>` : ''}`;
+        ${own ? `<div class="section-title">Безопасность</div>
+          <div class="list">
+            ${faceIdOk ? `<label class="row-item has-icon"><span class="ri-icon" style="background:var(--ok)">${I.face}</span>
+              <span class="grow">Вход по Face ID</span>
+              <span class="switch"><input type="checkbox" id="faceToggle"${faceIdOn() ? ' checked' : ''}><span></span></span></label>` : ''}
+            <a class="row-item has-icon" href="#/pin"><span class="ri-icon" style="background:#8e8e93">${I.key}</span>
+              <span class="grow">Сменить PIN</span>${chev}</a>
+          </div>
+          ${m.role !== ROLE_MANAGER ? `<div class="card"><details class="mgr" style="margin:0"><summary>Я руководитель</summary>
+            <div class="goal-own"><div class="field" style="margin:0"><input type="password" inputmode="numeric" id="mcode" autocomplete="off" placeholder="Код руководителя"></div>
+            <button class="btn small primary" id="mgrSave">OK</button></div></details></div>` : ''}
+          <div class="list"><button class="row-item danger" id="logout">Выйти</button></div>` : ''}`;
 
       const reload = () => { cache.me = {}; load(); };
       const run = async (btn, fn, okMsg) => {
@@ -1785,7 +1873,7 @@
       };
       if ($('goalEdit')) $('goalEdit').onclick = () => { goalEdit = true; render(m); };
       if ($('dayStart')) $('dayStart').onclick = (ev) => {
-        ev.target.textContent = '📍 Определяем местоположение…';
+        ev.target.textContent = 'Определяем местоположение…';
         run(ev.target, async () => api.dayStart(await getGeo()), 'Рабочий день начат');
       };
       if ($('dayEnd')) $('dayEnd').onclick = (ev) => {
@@ -1802,7 +1890,7 @@
         const s = await api.becomeManager($('mcode').value.trim());
         me.role = s.role; me.token = s.token;
         store.set('role', s.role); store.set('token', s.token);
-        setBar('Мой кабинет', '#/');
+        setBar('Профиль');
       }, 'Вы руководитель — в главном меню появилась статистика команды');
       if ($('logout')) $('logout').onclick = () => { if (confirm('Выйти из приложения?')) logout('', false); };
     };
@@ -1906,7 +1994,7 @@
         <span><i style="background:#f0a24a"></i>у других</span><span><i style="background:#1f8a4c"></i>выполнена</span>
       </div>
       <div class="muted">На карте ${shown.length} из ${pts.length} точек${pts.length - shown.length ? ' · без координат: ' + (pts.length - shown.length) : ''}</div>
-      <button class="btn ghost small" id="whereMe" style="margin-top:8px">📍 Где я</button>`;
+      <button class="btn ghost small" id="whereMe" style="margin-top:8px">${I.pin} Где я</button>`;
     const map = newMap();
     const marks = shown.map((p) => L.circleMarker([p.lat, p.lon], { radius: 9, color: '#fff', weight: 2, fillColor: colorOf(p), fillOpacity: 0.95 })
       .bindPopup(`<b>${p.n}. ${esc(p.name)}</b><br>${esc(cleanAddr(p.address))}<br><a href="#/p/${p.id}">Открыть точку ›</a>`).addTo(map));

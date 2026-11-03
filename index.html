@@ -8,7 +8,8 @@
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <meta name="apple-mobile-web-app-title" content="Alina Sales">
-  <meta name="theme-color" content="#2a3b7e">
+  <meta name="theme-color" content="#f2f2f7" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
   <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
   <link rel="icon" href="icons/icon-192.png">
   <link rel="manifest" href="manifest.webmanifest">
@@ -16,13 +17,18 @@
 </head>
 <body>
   <header class="bar">
-    <button class="bar-back" id="back" hidden aria-label="Назад">‹</button>
-    <img class="bar-logo" id="logo" src="icons/alina-logo.svg" alt="Alina Group" hidden>
+    <button class="bar-back" id="back" hidden aria-label="Назад"><svg class="i" viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg><span id="backLabel">Назад</span></button>
+    <picture class="bar-logo" id="logo" hidden>
+      <source srcset="icons/alina-logo.svg" media="(prefers-color-scheme: dark)">
+      <img src="icons/alina-logo-navy.svg" alt="Alina Group">
+    </picture>
     <div class="bar-title" id="title">Alina Sales</div>
-    <button class="bar-btn" id="who" hidden></button>
+    <a class="bar-action" id="action" hidden></a>
   </header>
   <div class="banner" id="banner" hidden></div>
+  <h1 class="large-title" id="ltitle" hidden></h1>
   <main id="app"></main>
+  <nav class="tabbar" id="tabbar" hidden></nav>
   <div class="toast" id="toast" hidden></div>
   <script src="config.js"></script>
   <script src="app.js"></script>
