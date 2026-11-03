@@ -1,5 +1,5 @@
 // Кэш оболочки приложения: сначала сеть (чтобы обновления приходили сразу), без сети — кэш.
-const CACHE = 'alina-2gis-v2';
+const CACHE = 'alina-2gis-v3';
 const SHELL = ['./', 'index.html', 'styles.css', 'app.js', 'config.js', 'manifest.webmanifest',
   'icons/apple-touch-icon.png', 'icons/icon-192.png'];
 

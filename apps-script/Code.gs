@@ -29,7 +29,7 @@ const RESULT_FIELDS = [
   ['contact', 'Контактное лицо'], ['position', 'Должность'],
   ['phone', 'Телефон'], ['whatsapp', 'WhatsApp'], ['instagram', 'Instagram / сайт'],
   ['assortment', 'Ассортимент'], ['competitors', 'Бренды конкурентов'],
-  ['supplier', 'Поставщик'], ['alina', 'Работают с Alina'],
+  ['supplier', 'Поставщик'], ['alina', 'Работают с Alina'], ['ourBrands', 'Наши бренды в точке'],
   ['interest', 'Интерес'], ['nextStep', 'Итог / следующий шаг'],
   ['comment', 'Комментарий'], ['photos', 'Фото'], ['id', 'id'],
 ];
@@ -204,6 +204,7 @@ function doGet(e) {
     const q = e.parameter || {};
     if (q.action === 'summary') return summary_();
     if (q.action === 'points') return { points: points_(Number(q.route)) };
+    if (q.action === 'result') return { result: result_(q.id) };
     if (q.action === 'ping') return { ok: true };
     throw new Error('Неизвестное действие');
   });
@@ -217,6 +218,8 @@ function doPost(e) {
     if (body.action === 'claim') return withLock_(() => claim_(body.id, agent));
     if (body.action === 'release') return withLock_(() => release_(body.id, agent));
     if (body.action === 'complete') return withLock_(() => complete_(body.id, agent, body.form || {}, body.photos || []));
+    if (body.action === 'update') return withLock_(() => update_(body.id, agent, body.form || {}, body.photos || []));
+    if (body.action === 'remove') return withLock_(() => remove_(body.id, agent));
     throw new Error('Неизвестное действие');
   });
 }
@@ -309,7 +312,7 @@ function complete_(id, agent, form, photos) {
     agent: agent, time: Utilities.formatDate(now, TZ, 'dd.MM.yyyy HH:mm'),
     photos: photoLinks.join('\n'), id: row[P.id],
   });
-  ['assortment', 'competitors'].forEach(k => { if (Array.isArray(rec[k])) rec[k] = rec[k].join(', '); });
+  joinLists_(rec);
 
   const rs = resultSheet_(route);
   const values = RESULT_FIELDS.map(f => rec[f[0]] == null ? '' : String(rec[f[0]]));
@@ -319,6 +322,72 @@ function complete_(id, agent, form, photos) {
   sh.getRange(rowIndex, P.status + 1, 1, 4).setValues([[ST_DONE, agent, row[P.claimed] || now, now]]);
   row[P.status] = ST_DONE; row[P.agent] = agent;
   return { point: toPoint_(row), photos: photoLinks.length };
+}
+
+const LIST_FIELDS = ['assortment', 'competitors', 'ourBrands'];
+function joinLists_(rec) {
+  LIST_FIELDS.forEach(k => { if (Array.isArray(rec[k])) rec[k] = rec[k].join(', '); });
+}
+
+/** Строка анкеты точки в листе «Маршрут N» (последняя, если вдруг их несколько). */
+function findResult_(id) {
+  const route = Number(String(id).replace(/^R(\d+)-.*$/, '$1'));
+  const rs = resultSheet_(route);
+  const last = rs.getLastRow();
+  if (last < 2) return null;
+  const values = rs.getRange(2, 1, last - 1, RESULT_FIELDS.length).getValues();
+  const idCol = RESULT_FIELDS.findIndex(f => f[0] === 'id');
+  for (let i = values.length - 1; i >= 0; i--) {
+    if (String(values[i][idCol]) === String(id)) return { rs, rowIndex: i + 2, values: values[i] };
+  }
+  return null;
+}
+
+/** Анкета и автор — только автор анкеты может её менять или удалять. */
+function ownResult_(id, agent) {
+  const point = findRow_(id);
+  if (point.row[P.status] !== ST_DONE) throw new Error('Точка ещё не выполнена');
+  if (point.row[P.agent] !== agent) throw new Error('Анкету заполнил(а) ' + point.row[P.agent] + ' — изменить может только автор');
+  const res = findResult_(id);
+  if (!res) throw new Error('Анкета не найдена в таблице');
+  return { point, res };
+}
+
+function result_(id) {
+  const res = findResult_(id);
+  if (!res) return null;
+  const out = {};
+  RESULT_FIELDS.forEach((f, i) => { out[f[0]] = String(res.values[i]); });
+  return out;
+}
+
+function update_(id, agent, form, photos) {
+  const { point, res } = ownResult_(id, agent);
+  const old = {};
+  RESULT_FIELDS.forEach((f, i) => { old[f[0]] = String(res.values[i]); });
+  const added = savePhotos_(Number(point.row[P.route]), point.row, photos, new Date());
+  const rec = Object.assign({}, old, form, {
+    n: old.n, name: old.name, type: old.type, address: old.address, agent: old.agent, time: old.time, id: old.id,
+    photos: [old.photos].concat(added).filter(Boolean).join('\n'),
+  });
+  joinLists_(rec);
+  const values = RESULT_FIELDS.map(f => rec[f[0]] == null ? '' : String(rec[f[0]]));
+  res.rs.getRange(res.rowIndex, 1, 1, values.length).setNumberFormat('@').setValues([values]);
+  return { point: toPoint_(point.row), photos: added.length };
+}
+
+/** Удаляет анкету, фото уходят в корзину Google Drive, точка снова свободна. */
+function remove_(id, agent) {
+  const { point, res } = ownResult_(id, agent);
+  const photoCol = RESULT_FIELDS.findIndex(f => f[0] === 'photos');
+  String(res.values[photoCol]).split(/\s+/).forEach(url => {
+    const m = url.match(/\/d\/([\w-]+)/);
+    if (m) try { DriveApp.getFileById(m[1]).setTrashed(true); } catch (e) {}
+  });
+  res.rs.deleteRow(res.rowIndex);
+  point.sh.getRange(point.rowIndex, P.status + 1, 1, 4).setValues([[ST_FREE, '', '', '']]);
+  point.row[P.status] = ST_FREE; point.row[P.agent] = '';
+  return { point: toPoint_(point.row) };
 }
 
 function savePhotos_(route, row, photos, now) {
@@ -361,8 +430,23 @@ function resultSheet_(route) {
     sh.getRange(1, 1, 1, RESULT_FIELDS.length).setValues([RESULT_FIELDS.map(f => f[1])])
       .setFontWeight('bold').setBackground('#fde7d9');
     sh.setFrozenRows(1);
+  } else {
+    ensureResultColumns_(sh);
   }
   return sh;
+}
+
+/** Новые поля анкеты вставляются колонкой на своё место — старые строки не сдвигаются. */
+function ensureResultColumns_(sh) {
+  const width = Math.max(sh.getLastColumn(), 1);
+  const header = sh.getRange(1, 1, 1, width).getValues()[0].map(String);
+  RESULT_FIELDS.forEach((f, i) => {
+    if (header[i] === f[1]) return;
+    if (header.indexOf(f[1]) >= 0) return;
+    sh.insertColumnBefore(i + 1);
+    sh.getRange(1, i + 1).setValue(f[1]).setFontWeight('bold').setBackground('#fde7d9');
+    header.splice(i, 0, f[1]);
+  });
 }
 
 function subFolder_(parent, name) {

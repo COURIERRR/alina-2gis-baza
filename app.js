@@ -8,6 +8,7 @@
     'Клей', 'Герметики и пена', 'Растворители', 'Колеровка', 'Инструмент'];
   const COMPETITORS = ['Tikkurila', 'Dulux', 'Alpina', 'Caparol', 'Ceresit', 'Knauf', 'Текс',
     'VGT', 'Лакра', 'Eskaro', 'Marshall', 'Местные / Китай'];
+  const OUR_BRANDS = ['AlinEX', 'НАШИ', 'Norma', 'Alina Paint', 'Алкиды', 'FAWORI', 'V-tech'];
   const ALINA = ['Да, работают', 'Раньше работали', 'Нет'];
   const INTEREST = ['Высокий', 'Средний', 'Низкий', 'Отказ'];
 
@@ -97,6 +98,9 @@
       claim: (id) => post('claim', { id }).then((d) => d.point),
       release: (id) => post('release', { id }).then((d) => d.point),
       complete: (id, form, photos, agent) => post('complete', { id, form, photos, agent: agent || me.agent }).then((d) => d.point),
+      result: (id) => get('result', { id }).then((d) => d.result),
+      update: (id, form, photos) => post('update', { id, form, photos }).then((d) => d.point),
+      remove: (id) => post('remove', { id }).then((d) => d.point),
     };
   }
 
@@ -156,6 +160,29 @@
         log.push({ id, agent: who, time: new Date().toISOString(), form, photos: photos.length });
         store.set('mock:results', log);
         return wait(await setState(id, 'выполнена', who));
+      },
+      result: async (id) => {
+        const r = store.get('mock:results', []).filter((x) => x.id === id).pop();
+        if (!r) return wait(null);
+        const out = Object.assign({}, r.form, { photos: Array(r.photos).fill('photo').join('\n') });
+        ['assortment', 'competitors', 'ourBrands'].forEach((k) => { if (Array.isArray(out[k])) out[k] = out[k].join(', '); });
+        return wait(out);
+      },
+      update: async (id, form, photos) => {
+        const p = (await all()).find((x) => x.id === id);
+        if (!p || p.status !== 'выполнена' || p.agent !== me.agent) fail('Изменить анкету может только автор');
+        const log = store.get('mock:results', []);
+        const r = log.filter((x) => x.id === id).pop();
+        r.form = form;
+        r.photos += photos.length;
+        store.set('mock:results', log);
+        return wait(p);
+      },
+      remove: async (id) => {
+        const p = (await all()).find((x) => x.id === id);
+        if (!p || p.status !== 'выполнена' || p.agent !== me.agent) fail('Удалить анкету может только автор');
+        store.set('mock:results', store.get('mock:results', []).filter((x) => x.id !== id));
+        return wait(await setState(id, 'свободна', ''));
       },
     };
   }
@@ -393,6 +420,7 @@
       if (!p) return showError(new Error('Точка не найдена'), () => { location.hash = '#/r/' + routeNo; });
     }
     let photos = [];
+    let editing = null; // значения анкеты, когда автор её редактирует
     renderPoint();
     // Актуальный статус с сервера
     loadPoints(routeNo).then((pts) => {
@@ -409,7 +437,9 @@
       const other = p.status === 'в работе' && !mine;
       const done = p.status === 'выполнена';
       const pending = isPending(id);
-      const canFill = !other && !done && !pending;
+      const canFill = (!other && !done && !pending) || !!editing;
+      const ownDone = done && p.agent === me.agent;
+      const src = editing || draft;
 
       let status = '';
       if (pending) status = '<div class="status-box work">Анкета сохранена и ждёт отправки (нет связи)</div>';
@@ -419,7 +449,7 @@
 
       // Телефоны точки (если есть в базе) подставляются в анкету по умолчанию
       const known = { phone: p.phone || '', whatsapp: p.whatsapp || '' };
-      const d = (k) => esc(draft[k] != null ? draft[k] : (known[k] || ''));
+      const d = (k) => esc(src[k] != null ? src[k] : (known[k] || ''));
       const contacts = [
         p.phone ? `<a href="tel:${esc(telDigits(p.phone))}">📞 ${esc(p.phone)}</a>` : '',
         waUrl(p.whatsapp) ? `<a href="${waUrl(p.whatsapp)}" target="_blank" rel="noopener">💬 WhatsApp</a>` : '',
@@ -440,28 +470,34 @@
           ${!done && !other && !pending ? (mine
             ? '<button class="btn ghost" id="release">Отказаться от точки</button>'
             : '<button class="btn" id="claim">Беру в работу</button>') : ''}
+          ${ownDone && !editing ? `<div class="btns">
+            <button class="btn" id="edit">✏️ Изменить анкету</button>
+            <button class="btn ghost" id="remove">🗑 Удалить анкету</button></div>` : ''}
         </div>
         ${canFill ? `
         <form class="card" id="f" autocomplete="off">
-          <h2 style="margin-bottom:12px">Анкета точки</h2>
+          <h2 style="margin-bottom:12px">${editing ? 'Изменение анкеты' : 'Анкета точки'}</h2>
           <div class="field"><label>Контактное лицо</label><input type="text" name="contact" value="${d('contact')}"></div>
           <div class="field"><label>Должность</label><input type="text" name="position" placeholder="владелец, продавец, закупщик…" value="${d('position')}"></div>
           <div class="field"><label>Телефон</label><input type="tel" name="phone" placeholder="+7" value="${d('phone')}"></div>
           <div class="field"><label>WhatsApp</label><input type="tel" name="whatsapp" placeholder="если отличается" value="${d('whatsapp')}"></div>
           <div class="field"><label>Instagram / сайт</label><input type="text" name="instagram" autocapitalize="off" value="${d('instagram')}"></div>
-          <div class="field"><span class="label">Ассортимент</span>${chips('assortment', ASSORTMENT, 'checkbox', draft.assortment || [])}
+          <div class="field"><span class="label">Ассортимент</span>${chips('assortment', ASSORTMENT, 'checkbox', src.assortment || [])}
             <input type="text" name="assortmentOther" placeholder="Другое" style="margin-top:8px" value="${d('assortmentOther')}"></div>
-          <div class="field"><span class="label">Бренды конкурентов на полке</span>${chips('competitors', COMPETITORS, 'checkbox', draft.competitors || [])}
+          <div class="field"><span class="label">Бренды конкурентов на полке</span>${chips('competitors', COMPETITORS, 'checkbox', src.competitors || [])}
             <input type="text" name="competitorsOther" placeholder="Другие бренды" style="margin-top:8px" value="${d('competitorsOther')}"></div>
           <div class="field"><label>Поставщик (у кого закупаются)</label><input type="text" name="supplier" value="${d('supplier')}"></div>
-          <div class="field"><span class="label">Работают с Alina?</span>${chips('alina', ALINA, 'radio', [draft.alina])}</div>
-          <div class="field"><span class="label">Интерес к сотрудничеству <span class="req">*</span></span>${chips('interest', INTEREST, 'radio', [draft.interest])}</div>
+          <div class="field"><span class="label">Работают с Alina?</span>${chips('alina', ALINA, 'radio', [src.alina])}</div>
+          <div class="field"><span class="label">Наши бренды в точке</span>${chips('ourBrands', OUR_BRANDS, 'checkbox', src.ourBrands || [])}</div>
+          <div class="field"><span class="label">Интерес к сотрудничеству <span class="req">*</span></span>${chips('interest', INTEREST, 'radio', [src.interest])}</div>
           <div class="field"><label>Итог / следующий шаг</label><textarea name="nextStep" placeholder="Например: отправить прайс в WhatsApp, перезвонить в пятницу">${d('nextStep')}</textarea></div>
           <div class="field"><label>Комментарий</label><textarea name="comment">${d('comment')}</textarea></div>
           <div class="field"><span class="label">Фото витрины</span>
             <label class="btn ghost file-btn">📷 Добавить фото<input type="file" id="photo" accept="image/*" multiple></label>
+            ${editing && editing.photoCount ? `<div class="muted">Уже загружено фото: ${editing.photoCount}. Новые добавятся к ним.</div>` : ''}
             <div class="photos" id="photos"></div></div>
-          <button class="btn ok" type="submit" id="submit">✓ Выполнено — отправить</button>
+          <button class="btn ok" type="submit" id="submit">${editing ? '💾 Сохранить изменения' : '✓ Выполнено — отправить'}</button>
+          ${editing ? '<button class="btn ghost" type="button" id="cancelEdit" style="margin-top:8px">Отмена</button>' : ''}
         </form>` : ''}`;
 
       $('go').onclick = () => openRoute(p);
@@ -469,9 +505,16 @@
       if ($('release')) $('release').onclick = (ev) => {
         if (confirm('Вернуть точку в свободные?')) act(ev.target, () => api.release(id), 'Точка освобождена');
       };
+      if ($('edit')) $('edit').onclick = (ev) => startEdit(ev.target);
+      if ($('remove')) $('remove').onclick = (ev) => {
+        if (confirm('Удалить анкету? Точка снова станет свободной, фото уйдут в корзину Google Диска.')) {
+          act(ev.target, () => api.remove(id), 'Анкета удалена');
+        }
+      };
+      if ($('cancelEdit')) $('cancelEdit').onclick = () => { editing = null; photos = []; renderPoint(); };
       const f = $('f');
       if (!f) return;
-      f.oninput = () => store.set('draft:' + id, readForm(f));
+      f.oninput = () => { if (!editing) store.set('draft:' + id, readForm(f)); };
       $('photo').onchange = async (ev) => {
         const files = Array.from(ev.target.files || []);
         ev.target.value = '';
@@ -505,6 +548,20 @@
       if (location.hash === hash) renderPoint();
     }
 
+    async function startEdit(btn) {
+      btn.disabled = true;
+      try {
+        const r = await api.result(id);
+        if (!r) throw Object.assign(new Error('Анкета не найдена в таблице'), { server: true });
+        editing = toEditForm(r);
+        photos = [];
+      } catch (e) {
+        toast(e.server ? e.message : 'Нет связи, попробуйте ещё раз', true);
+      }
+      if (location.hash === hash) renderPoint();
+      if (editing && $('f')) $('f').scrollIntoView();
+    }
+
     async function submit(f) {
       const form = readForm(f);
       if (!form.interest) return toast('Отметьте интерес к сотрудничеству', true);
@@ -513,6 +570,24 @@
       delete form.assortmentOther;
       delete form.competitorsOther;
       const btn = $('submit');
+      if (editing) {
+        btn.disabled = true;
+        btn.textContent = 'Сохранение…';
+        try {
+          p = await api.update(id, form, photos);
+          updateCached(p);
+          editing = null;
+          photos = [];
+          toast('Изменения сохранены');
+        } catch (e) {
+          toast(e.server ? e.message : 'Нет связи, изменения не сохранены', true);
+          btn.disabled = false;
+          btn.textContent = '💾 Сохранить изменения';
+          return;
+        }
+        if (location.hash === hash) renderPoint();
+        return;
+      }
       btn.disabled = true;
       btn.textContent = 'Отправка…';
       try {
@@ -542,6 +617,25 @@
     }
   }
 
+  // Строка анкеты из таблицы → значения формы (списки «через запятую» обратно в отметки)
+  function toEditForm(r) {
+    const split = (s, options) => {
+      const items = String(s || '').split(/,\s*/).map((x) => x.trim()).filter(Boolean);
+      return { chosen: items.filter((x) => options.indexOf(x) >= 0), other: items.filter((x) => options.indexOf(x) < 0).join(', ') };
+    };
+    const a = split(r.assortment, ASSORTMENT);
+    const c = split(r.competitors, COMPETITORS);
+    const out = {};
+    ['contact', 'position', 'phone', 'whatsapp', 'instagram', 'supplier', 'alina', 'interest', 'nextStep', 'comment']
+      .forEach((k) => { out[k] = r[k] || ''; });
+    return Object.assign(out, {
+      assortment: a.chosen, assortmentOther: a.other,
+      competitors: c.chosen, competitorsOther: c.other,
+      ourBrands: split(r.ourBrands, OUR_BRANDS).chosen,
+      photoCount: String(r.photos || '').split(/\s+/).filter(Boolean).length,
+    });
+  }
+
   function updateCached(p) {
     const list = cachedPoints(p.route);
     if (!list) return;
@@ -552,9 +646,9 @@
   }
 
   function readForm(f) {
-    const data = { assortment: [], competitors: [] };
+    const data = { assortment: [], competitors: [], ourBrands: [] };
     new FormData(f).forEach((v, k) => {
-      if (k === 'assortment' || k === 'competitors') data[k].push(v);
+      if (k in data && Array.isArray(data[k])) data[k].push(v);
       else data[k] = String(v).trim();
     });
     return data;
