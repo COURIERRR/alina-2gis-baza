@@ -256,11 +256,11 @@ function doGet(e) {
     const q = e.parameter || {};
     if (q.action === 'ping') return {};
     auth_(q.token);
-    if (q.action === 'summary') return summary_();
-    if (q.action === 'points') return { points: points_(Number(q.route)) };
+    if (q.action === 'summary') return cached_('summary', 600, summary_);
+    if (q.action === 'points') return { points: cached_('points:' + Number(q.route), 600, () => points_(Number(q.route))) };
     if (q.action === 'result') return { result: result_(q.id) };
-    if (q.action === 'history') return { visits: history_(q.id) };
-    if (q.action === 'tasks') return { tasks: tasks_(q.point) };
+    if (q.action === 'history') return { visits: cached_('hist:' + q.id, 600, () => history_(q.id)) };
+    if (q.action === 'tasks') return { tasks: allTasksCached_().filter(t => !q.point || t.point === String(q.point)) };
     throw new Error('Неизвестное действие');
   });
 }
@@ -288,9 +288,10 @@ function doPost(e) {
       case 'goalSet': return withLock_(() => goalSet_(agent, body.goal));
       case 'dayStart': return withLock_(() => dayStart_(agent, body.geo));
       case 'dayEnd': return withLock_(() => dayEnd_(agent, body.geo));
-      case 'me': return { me: me_(me, Number(body.from) || 0, body.who) };
-      case 'stats': requireManager_(me); return { stats: stats_(Number(body.from) || 0) };
-      case 'staff': requireManager_(me); return { staff: staff_() };
+      case 'me': return { me: meCached_(me, Number(body.from) || 0, body.who) };
+      case 'boot': return boot_(me, Number(body.from) || 0);
+      case 'stats': requireManager_(me); return { stats: statsCached_(Number(body.from) || 0) };
+      case 'staff': requireManager_(me); return { staff: cached_('staff', 600, staff_) };
       case 'staffReset': requireManager_(me); return withLock_(() => staffSet_(me, body.name, 'reset'));
       case 'staffBlock': requireManager_(me); return withLock_(() => staffSet_(me, body.name, body.blocked ? 'block' : 'unblock'));
       case 'staffRole': requireManager_(me); return withLock_(() => staffSet_(me, body.name, body.role === ROLE_MANAGER ? 'manager' : 'agent'));
@@ -308,15 +309,57 @@ function handle_(fn) {
 
 const fail_ = (message, code) => { const e = new Error(message); if (code) e.code = code; throw e; };
 
+const allTasksCached_ = () => cached_('tasks', 600, () => tasks_(''));
+const meCached_ = (me, from, who) => cached_('me:' + nameKey_(me.name) + ':' + (me.role === ROLE_MANAGER ? nameKey_(who) : '') + ':' + from, 600,
+  () => me_(me, from, who));
+const statsCached_ = (from) => cached_('stats:' + from, 300, () => stats_(from));
+
+/** Стартовый экран одним запросом: маршруты, задания, свой день; руководителю — ещё «Сегодня» по команде. */
+function boot_(me, from) {
+  return {
+    routes: cached_('summary', 600, summary_).routes,
+    tasks: allTasksCached_(),
+    me: meCached_(me, from, ''),
+    stats: me.role === ROLE_MANAGER ? statsCached_(from) : null,
+  };
+}
+
 function requireManager_(me) {
   if (me.role !== ROLE_MANAGER) fail_('Только для руководителя');
 }
 
+// Все изменения идут через блокировку — после каждого меняется «версия данных», и кэш чтения устаревает
 function withLock_(fn) {
   const lock = LockService.getScriptLock();
   lock.waitLock(25000);
-  try { return fn(); } finally { lock.releaseLock(); }
+  try { return fn(); } finally { bumpData_(); lock.releaseLock(); }
 }
+
+/* ---------------- Кэш чтения (CacheService) ----------------
+ * Каждый запрос к Apps Script и так стоит ~1 с, поэтому тяжёлые чтения (все точки, все визиты, статистика)
+ * считаются один раз и держатся в кэше, пока кто-то что-то не изменит. */
+const CACHE_MAX = 95000; // лимит CacheService — 100 КБ на значение
+const cache_ = () => CacheService.getScriptCache();
+function dataVer_() {
+  let v = cache_().get('dv');
+  if (!v) { v = String(Date.now()); cache_().put('dv', v, 21600); }
+  return v;
+}
+function bumpData_() { try { cache_().put('dv', Utilities.getUuid().slice(0, 8), 21600); } catch (e) {} }
+function cached_(key, ttl, fn) {
+  const k = 'c:' + dataVer_() + ':' + key;
+  try { const hit = cache_().get(k); if (hit) return JSON.parse(hit); } catch (e) {}
+  const value = fn();
+  try { const s = JSON.stringify(value); if (s.length < CACHE_MAX) cache_().put(k, s, ttl); } catch (e) {}
+  return value;
+}
+// Отдельная версия для сотрудников: вход проверяется на каждом запросе, а меняются сотрудники редко
+function staffVer_() {
+  let v = cache_().get('sv');
+  if (!v) { v = String(Date.now()); cache_().put('sv', v, 21600); }
+  return v;
+}
+function bumpStaff_() { try { cache_().put('sv', Utilities.getUuid().slice(0, 8), 21600); } catch (e) {} }
 
 function checkManager_(code) {
   const real = PropertiesService.getScriptProperties().getProperty('MANAGER_CODE');
@@ -773,7 +816,7 @@ function feed_(from, only) {
   const lsh = logSheet_();
   const lastLog = lsh.getLastRow();
   if (lastLog < 2) return feed;
-  const n = Math.min(lastLog - 1, 3000);
+  const n = Math.min(lastLog - 1, 1500);
   const rows = lsh.getRange(lastLog - n + 1, 1, n, LOG_HEADER.length).getValues();
   for (let i = rows.length - 1; i >= 0 && feed.length < 100; i--) {
     const t = rows[i][0] instanceof Date ? rows[i][0].getTime() : 0;
@@ -815,10 +858,21 @@ function auth_(token) {
   if (sign_(payload) !== parts[3]) fail_('Войдите заново', 'auth');
   if (Date.now() - parseInt(parts[1], 36) > TOKEN_DAYS * 86400000) fail_('Сессия истекла — войдите заново', 'auth');
   const name = Utilities.newBlob(Utilities.base64DecodeWebSafe(parts[0])).getDataAsString('UTF-8');
+  const st = staffInfo_(name);
+  if (!st || !st.hasPin || String(st.ver) !== parts[2]) fail_('Войдите заново', 'auth');
+  if (st.status === ST_BLOCKED) fail_('Доступ закрыт — обратитесь к руководителю', 'auth');
+  return { name: st.name, role: st.role };
+}
+
+/** Сотрудник для проверки входа — из кэша, пока список сотрудников не менялся. */
+function staffInfo_(name) {
+  const k = 'si:' + staffVer_() + ':' + Utilities.base64EncodeWebSafe(nameKey_(name), Utilities.Charset.UTF_8);
+  try { const hit = cache_().get(k); if (hit) return JSON.parse(hit); } catch (e) {}
   const st = findStaff_(name);
-  if (!st || !st.row[S.hash] || String(Number(st.row[S.ver]) || 1) !== parts[2]) fail_('Войдите заново', 'auth');
-  if (st.row[S.status] === ST_BLOCKED) fail_('Доступ закрыт — обратитесь к руководителю', 'auth');
-  return { name: String(st.row[S.name]), role: String(st.row[S.role] || ROLE_AGENT) };
+  const info = st ? { name: String(st.row[S.name]), hasPin: !!st.row[S.hash], ver: Number(st.row[S.ver]) || 1,
+    role: String(st.row[S.role] || ROLE_AGENT), status: String(st.row[S.status] || ST_ACTIVE) } : null;
+  try { cache_().put(k, JSON.stringify(info), 600); } catch (e) {}
+  return info;
 }
 
 const session_ = (name, role, ver) => ({ token: makeToken_(name, ver), name, role });
@@ -846,6 +900,7 @@ function register_(name, pin, managerCode) {
   } else {
     staffSheet_().appendRow([name, hashPin_(salt, pin), salt, role, ST_ACTIVE, now, now, ver]);
   }
+  bumpStaff_();
   log_(name, 'зарегистрировался', '', role);
   return session_(name, role, ver);
 }
@@ -876,6 +931,7 @@ function pinChange_(me, oldPin, pin) {
   const ver = (Number(st.row[S.ver]) || 1) + 1;
   st.sh.getRange(st.rowIndex, S.hash + 1, 1, 2).setValues([[hashPin_(salt, pin), salt]]);
   st.sh.getRange(st.rowIndex, S.ver + 1).setValue(ver);
+  bumpStaff_();
   log_(me.name, 'сменил PIN', '', '');
   return session_(me.name, me.role, ver);
 }
@@ -884,6 +940,7 @@ function becomeManager_(me, code) {
   checkManager_(code);
   const st = findStaff_(me.name);
   st.sh.getRange(st.rowIndex, S.role + 1).setValue(ROLE_MANAGER);
+  bumpStaff_();
   log_(me.name, 'стал руководителем', '', '');
   return session_(me.name, ROLE_MANAGER, Number(st.row[S.ver]) || 1);
 }
@@ -917,6 +974,7 @@ function staffSet_(me, name, what) {
   if (what === 'block' || what === 'unblock') st.sh.getRange(st.rowIndex, S.status + 1).setValue(what === 'block' ? ST_BLOCKED : ST_ACTIVE);
   if (what === 'manager' || what === 'agent') st.sh.getRange(st.rowIndex, S.role + 1).setValue(what === 'manager' ? ROLE_MANAGER : ROLE_AGENT);
   st.sh.getRange(st.rowIndex, S.ver + 1).setValue(ver);
+  bumpStaff_();
   const labels = { reset: 'сбросил PIN', block: 'заблокировал', unblock: 'разблокировал', manager: 'назначил руководителем', agent: 'назначил агентом' };
   log_(me.name, labels[what], '', String(st.row[S.name]));
   return { staff: staff_() };
@@ -990,7 +1048,8 @@ function me_(me, from, who) {
   return {
     name, role: st ? String(st.row[S.role] || ROLE_AGENT) : ROLE_AGENT,
     period, today: Object.assign({ visits: todayVisits }, row ? dayOut_(row) : { goal: 0, start: '', end: '' }),
-    todo: todo_(name, visits), feed: feed_(from, name).slice(0, 30),
+    // Лента нужна только руководителю в чужом кабинете — свой кабинет не читает «Журнал»
+    todo: todo_(name, visits), feed: name !== me.name ? feed_(from, name).slice(0, 30) : [],
   };
 }
 
@@ -1118,6 +1177,14 @@ function resultSheet_(route) {
 
 /** Новые поля анкеты вставляются колонкой на своё место — старые строки не сдвигаются. */
 function ensureResultColumns_(sh) {
+  // Проверка заголовка — лишнее чтение листа на каждом запросе; после первой проверки помним 6 часов
+  const flag = 'cols:' + sh.getName() + ':' + RESULT_FIELDS.length;
+  if (cache_().get(flag)) return;
+  ensureResultColumnsNow_(sh);
+  cache_().put(flag, '1', 21600);
+}
+
+function ensureResultColumnsNow_(sh) {
   const width = Math.max(sh.getLastColumn(), 1);
   const header = sh.getRange(1, 1, 1, width).getValues()[0].map(String);
   RESULT_FIELDS.forEach((f, i) => {
