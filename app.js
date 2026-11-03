@@ -51,13 +51,15 @@
 
   /* ---------- 2ГИС ---------- */
   const hasCoords = (p) => p.lat != null && p.lon != null && p.acc !== 'нет';
+  // Маршрут по координатам — только для точного адреса, иначе через поиск фирмы в 2ГИС
+  const routable = (p) => hasCoords(p) && p.acc === 'точно';
   const gisSearchUrl = (p) => 'https://2gis.kz/almaty/search/' + encodeURIComponent(p.name + ', ' + cleanAddr(p.address));
-  const gisRouteWebUrl = (p) => hasCoords(p)
+  const gisRouteWebUrl = (p) => routable(p)
     ? 'https://2gis.kz/almaty/directions/points/%7C' + p.lon + '%2C' + p.lat
     : gisSearchUrl(p);
 
   function openRoute(p) {
-    if (!hasCoords(p)) { location.href = gisSearchUrl(p); return; }
+    if (!routable(p)) { location.href = gisSearchUrl(p); return; }
     // Приложение 2ГИС: маршрут от текущего местоположения. Если приложения нет — сайт.
     const started = Date.now();
     location.href = 'dgis://2gis.ru/routeSearch/rsType/car/to/' + p.lon + ',' + p.lat;
@@ -426,11 +428,10 @@
           <div>${esc(p.address)}</div>
           <div class="btns">
             <button class="btn primary wide" id="go">🚗 Маршрут в 2ГИС</button>
-            <a class="btn ghost${hasCoords(p) ? '' : ' wide'}" href="${gisSearchUrl(p)}" target="_blank" rel="noopener">Найти в 2ГИС</a>
-            ${hasCoords(p) ? `<a class="btn ghost" href="${gisRouteWebUrl(p)}" target="_blank" rel="noopener">Маршрут на сайте</a>` : ''}
+            <a class="btn ghost${routable(p) ? '' : ' wide'}" href="${gisSearchUrl(p)}" target="_blank" rel="noopener">Найти в 2ГИС</a>
+            ${routable(p) ? `<a class="btn ghost" href="${gisRouteWebUrl(p)}" target="_blank" rel="noopener">Маршрут на сайте</a>` : ''}
           </div>
-          ${hasCoords(p) ? (p.acc === 'примерно' ? '<div class="muted">Координаты примерные — сверьтесь с «Найти в 2ГИС».</div>' : '')
-            : '<div class="muted">Координат нет — 2ГИС откроет поиск, нажмите там «Проехать».</div>'}
+          ${routable(p) ? '' : '<div class="muted">2ГИС откроет карточку фирмы — нажмите там «Проехать».</div>'}
           ${status}
           ${!done && !other && !pending ? (mine
             ? '<button class="btn ghost" id="release">Отказаться от точки</button>'
