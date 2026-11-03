@@ -23,7 +23,7 @@
   };
 
   const me = { agent: store.get('agent', '') };
-  const ui = { q: '', sort: 'order', showTaken: false, showDone: false, pos: null };
+  const ui = { q: '', sort: 'order', tab: store.get('ui:tab', 'free'), pos: null };
   const cache = { summary: store.get('cache:summary', null), points: {} };
   let refreshTimer = null;
   let currentLoad = null;
@@ -170,7 +170,7 @@
       },
       update: async (id, form, photos) => {
         const p = (await all()).find((x) => x.id === id);
-        if (!p || p.status !== 'выполнена' || p.agent !== me.agent) fail('Изменить анкету может только автор');
+        if (!p || p.status !== 'выполнена') fail('Точка ещё не выполнена');
         const log = store.get('mock:results', []);
         const r = log.filter((x) => x.id === id).pop();
         r.form = form;
@@ -180,7 +180,7 @@
       },
       remove: async (id) => {
         const p = (await all()).find((x) => x.id === id);
-        if (!p || p.status !== 'выполнена' || p.agent !== me.agent) fail('Удалить анкету может только автор');
+        if (!p || p.status !== 'выполнена') fail('Точка ещё не выполнена');
         store.set('mock:results', store.get('mock:results', []).filter((x) => x.id !== id));
         return wait(await setState(id, 'свободна', ''));
       },
@@ -362,15 +362,17 @@
           <div class="seg"><button data-sort="order" class="${ui.sort === 'order' ? 'on' : ''}">По порядку</button>
             <button data-sort="near" class="${ui.sort === 'near' ? 'on' : ''}">Ближайшие</button></div>
         </div>
-        <div class="stats" style="margin:0 4px 6px"><span>Свободно <b>${free.length}</b></span>
-          <span>У меня <b>${mine.length}</b></span><span>Заняты <b>${taken.length}</b></span><span>Выполнено <b>${done.length}</b></span></div>
-        ${mine.length ? '<div class="section-title">У меня в работе</div>' + mine.map(itemHtml).join('') : ''}
-        <div class="section-title">Свободные</div>
-        ${free.length ? free.map(itemHtml).join('') : '<div class="empty">Свободных точек нет</div>'}
-        ${taken.length ? `<button class="link-btn" id="tgTaken">${ui.showTaken ? 'Скрыть' : 'Показать'} занятые другими (${taken.length})</button>` : ''}
-        ${ui.showTaken ? taken.map(itemHtml).join('') : ''}
-        ${done.length ? `<div><button class="link-btn" id="tgDone">${ui.showDone ? 'Скрыть' : 'Показать'} выполненные (${done.length})</button></div>` : ''}
-        ${ui.showDone ? done.map(itemHtml).join('') : ''}`;
+        <div class="seg tabs">
+          <button data-tab="free" class="${ui.tab === 'free' ? 'on' : ''}">Свободные<b>${free.length + mine.length}</b></button>
+          <button data-tab="taken" class="${ui.tab === 'taken' ? 'on' : ''}">Заняты<b>${taken.length}</b></button>
+          <button data-tab="done" class="${ui.tab === 'done' ? 'on' : ''}">Выполнено<b>${done.length}</b></button>
+        </div>
+        ${ui.tab === 'free' ? `
+          ${mine.length ? '<div class="section-title">У меня в работе</div>' + mine.map(itemHtml).join('') : ''}
+          <div class="section-title">Свободные</div>
+          ${free.length ? free.map(itemHtml).join('') : '<div class="empty">Свободных точек нет</div>'}` : ''}
+        ${ui.tab === 'taken' ? (taken.length ? taken.map(itemHtml).join('') : '<div class="empty">Нет точек, занятых другими</div>') : ''}
+        ${ui.tab === 'done' ? (done.length ? done.map(itemHtml).join('') : '<div class="empty">Выполненных точек пока нет</div>') : ''}`;
 
       const qi = $('q');
       qi.oninput = () => { ui.q = qi.value; render(pts); };
@@ -381,8 +383,9 @@
           if (ui.sort === 'near') locate(() => render(pts)); else render(pts);
         };
       });
-      if ($('tgTaken')) $('tgTaken').onclick = () => { ui.showTaken = !ui.showTaken; render(pts); };
-      if ($('tgDone')) $('tgDone').onclick = () => { ui.showDone = !ui.showDone; render(pts); };
+      $app.querySelectorAll('[data-tab]').forEach((b) => {
+        b.onclick = () => { ui.tab = b.dataset.tab; store.set('ui:tab', ui.tab); render(pts); };
+      });
     };
 
     const cached = cachedPoints(routeNo);
@@ -438,7 +441,7 @@
       const done = p.status === 'выполнена';
       const pending = isPending(id);
       const canFill = (!other && !done && !pending) || !!editing;
-      const ownDone = done && p.agent === me.agent;
+      const ownDone = done && !pending;
       const src = editing || draft;
 
       let status = '';
@@ -505,9 +508,10 @@
       if ($('release')) $('release').onclick = (ev) => {
         if (confirm('Вернуть точку в свободные?')) act(ev.target, () => api.release(id), 'Точка освобождена');
       };
-      if ($('edit')) $('edit').onclick = (ev) => startEdit(ev.target);
+      const byOther = p.agent && p.agent !== me.agent ? 'Анкету заполнил(а) ' + p.agent + '. ' : '';
+      if ($('edit')) $('edit').onclick = (ev) => { if (!byOther || confirm(byOther + 'Изменить её?')) startEdit(ev.target); };
       if ($('remove')) $('remove').onclick = (ev) => {
-        if (confirm('Удалить анкету? Точка снова станет свободной, фото уйдут в корзину Google Диска.')) {
+        if (confirm(byOther + 'Удалить анкету? Точка снова станет свободной, фото уйдут в корзину Google Диска.')) {
           act(ev.target, () => api.remove(id), 'Анкета удалена');
         }
       };

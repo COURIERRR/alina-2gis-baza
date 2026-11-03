@@ -343,11 +343,10 @@ function findResult_(id) {
   return null;
 }
 
-/** Анкета и автор — только автор анкеты может её менять или удалять. */
-function ownResult_(id, agent) {
+/** Точка и её анкета для изменения или удаления (приложение предупреждает, если анкета чужая). */
+function ownResult_(id) {
   const point = findRow_(id);
   if (point.row[P.status] !== ST_DONE) throw new Error('Точка ещё не выполнена');
-  if (point.row[P.agent] !== agent) throw new Error('Анкету заполнил(а) ' + point.row[P.agent] + ' — изменить может только автор');
   const res = findResult_(id);
   if (!res) throw new Error('Анкета не найдена в таблице');
   return { point, res };
@@ -362,7 +361,7 @@ function result_(id) {
 }
 
 function update_(id, agent, form, photos) {
-  const { point, res } = ownResult_(id, agent);
+  const { point, res } = ownResult_(id);
   const old = {};
   RESULT_FIELDS.forEach((f, i) => { old[f[0]] = String(res.values[i]); });
   const added = savePhotos_(Number(point.row[P.route]), point.row, photos, new Date());
@@ -378,7 +377,7 @@ function update_(id, agent, form, photos) {
 
 /** Удаляет анкету, фото уходят в корзину Google Drive, точка снова свободна. */
 function remove_(id, agent) {
-  const { point, res } = ownResult_(id, agent);
+  const { point, res } = ownResult_(id);
   const photoCol = RESULT_FIELDS.findIndex(f => f[0] === 'photos');
   String(res.values[photoCol]).split(/\s+/).forEach(url => {
     const m = url.match(/\/d\/([\w-]+)/);
