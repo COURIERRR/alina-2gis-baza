@@ -1,11 +1,11 @@
 {
-  "name": "Alina Group — Отработка базы 2ГИС",
-  "short_name": "Alina 2ГИС",
+  "name": "Alina Group — Sales",
+  "short_name": "Alina Sales",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
-  "background_color": "#f4f2ef",
-  "theme_color": "#e8541e",
+  "background_color": "#f3f5f9",
+  "theme_color": "#2a3b7e",
   "lang": "ru",
   "icons": [
     { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },

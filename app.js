@@ -11,6 +11,15 @@
   const OUR_BRANDS = ['AlinEX', 'НАШИ', 'Norma', 'Alina Paint', 'Алкиды', 'FAWORI', 'V-tech'];
   const ALINA = ['Да, работают', 'Раньше работали', 'Нет'];
   const INTEREST = ['Высокий', 'Средний', 'Низкий', 'Отказ'];
+  const TASK_TYPES = [
+    'Отработать с командой ОТЭК',
+    'Отработать по бренду Alina Paint и NORMA',
+    'Отработать по бренду AlinEX и НАШИ',
+    'Отработать по бренду V-tech, Alina Paint Alkyd',
+    'Отработать по бренду FAWORI',
+    'Отработать по брендингу в торговой точке',
+  ];
+  const FAR_METERS = 300;
 
   const $ = (id) => document.getElementById(id);
   const $app = $('app');
@@ -22,9 +31,14 @@
     del(k) { try { localStorage.removeItem(k); } catch (e) {} },
   };
 
-  const me = { agent: store.get('agent', '') };
-  const ui = { q: '', sort: 'order', tab: store.get('ui:tab', 'free'), pos: null };
-  const cache = { summary: store.get('cache:summary', null), points: {} };
+  const me = { agent: store.get('agent', ''), role: store.get('role', ''), code: store.get('mcode', '') };
+  const isManager = () => me.role === 'manager' && !!me.code;
+  const ui = {
+    q: '', sort: 'order', tab: store.get('ui:tab', 'free'), pos: null,
+    tq: '', ttab: store.get('ui:ttab', 'free'), tstatus: 'open', tagent: '',
+    period: store.get('ui:period', 'today'), loginMgr: false, taskBack: null,
+  };
+  const cache = { summary: store.get('cache:summary', null), points: {}, tasks: store.get('cache:tasks', null), stats: {} };
   let refreshTimer = null;
   let currentLoad = null;
 
@@ -39,6 +53,16 @@
     if (n.length === 11 && n[0] === '8') n = '7' + n.slice(1);
     return n.length === 11 && n[0] === '7' && n.slice(1, 4) !== '800' ? 'https://wa.me/' + n : '';
   }
+  const pad = (n) => String(n).padStart(2, '0');
+  const ymd = (d) => d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+  const today = () => ymd(new Date());
+  function fmtTime(iso) {
+    if (!iso) return '';
+    const d = new Date(iso);
+    if (isNaN(d)) return String(iso);
+    return pad(d.getDate()) + '.' + pad(d.getMonth() + 1) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+  }
+  const fmtDue = (s) => s ? s.slice(8, 10) + '.' + s.slice(5, 7) : '';
 
   function toast(msg, isErr) {
     const t = $('toast');
@@ -54,6 +78,17 @@
     const dLat = (b.lat - a.lat) * r, dLon = (b.lon - a.lon) * r;
     const x = Math.sin(dLat / 2) ** 2 + Math.cos(a.lat * r) * Math.cos(b.lat * r) * Math.sin(dLon / 2) ** 2;
     return 2 * R * Math.asin(Math.sqrt(x));
+  }
+
+  // Местоположение для отметки визита; без GPS визит всё равно отправляется
+  function getGeo() {
+    return new Promise((resolve) => {
+      if (!navigator.geolocation) return resolve(null);
+      navigator.geolocation.getCurrentPosition(
+        (pos) => resolve({ lat: pos.coords.latitude, lon: pos.coords.longitude, acc: Math.round(pos.coords.accuracy) }),
+        () => resolve(null),
+        { enableHighAccuracy: true, timeout: 8000, maximumAge: 60000 });
+    });
   }
 
   /* ---------- 2ГИС ---------- */
@@ -74,6 +109,63 @@
     setTimeout(() => {
       if (!document.hidden && Date.now() - started < 3000) location.href = gisRouteWebUrl(p);
     }, 1500);
+  }
+
+  /* ---------- Задания: общие функции ---------- */
+  const isOpen = (t) => t.status === 'новое' || t.status === 'в работе';
+  const isOverdue = (t) => isOpen(t) && !!t.due && t.due < today();
+  function taskSort(a, b) {
+    return (isOpen(b) - isOpen(a)) || (isOverdue(b) - isOverdue(a)) ||
+      ((a.due || '9999') < (b.due || '9999') ? -1 : (a.due || '9999') > (b.due || '9999') ? 1 : 0) ||
+      String(b.created).localeCompare(String(a.created));
+  }
+  function taskCounts(ts) {
+    return {
+      free: ts.filter((t) => t.status === 'новое').length,
+      mine: ts.filter((t) => t.status === 'в работе' && t.assignee === me.agent).length,
+      overdue: ts.filter((t) => isOverdue(t) && (isManager() || t.status === 'новое' || t.assignee === me.agent)).length,
+    };
+  }
+
+  /** Статистика руководителя (в демо-режиме считается здесь, на сервере — так же в Code.gs). */
+  function computeStats(from, visits, tasks, log) {
+    const by = {};
+    const ag = (n) => by[n] || (by[n] = { name: n, visits: 0, newPoints: 0, far: 0, noGps: 0,
+      issued: 0, taken: 0, done: 0, inWork: 0, overdue: 0, last: 0 });
+    const seen = (a, t) => { if (t > a.last) a.last = t; };
+    const inP = (t) => t && t >= from;
+    visits.forEach((v) => {
+      if (!v.agent || !inP(v.t)) return;
+      const a = ag(v.agent);
+      a.visits++;
+      if (!(v.visit > 1)) a.newPoints++;
+      if (!v.gps) a.noGps++; else if (v.distance !== '' && v.distance != null && v.distance > FAR_METERS) a.far++;
+      seen(a, v.t);
+    });
+    let issued = 0, taken = 0, done = 0, open = 0, overdue = 0, hours = 0, hoursN = 0;
+    tasks.forEach((t) => {
+      const tc = Date.parse(t.created) || 0, tt = Date.parse(t.taken) || 0, td = Date.parse(t.done) || 0;
+      if (inP(tc) && t.author) { issued++; const a = ag(t.author); a.issued++; seen(a, tc); }
+      if (inP(tt) && t.assignee) { taken++; const a = ag(t.assignee); a.taken++; seen(a, tt); }
+      if (t.status === 'выполнено' && inP(td) && t.assignee) {
+        done++; const a = ag(t.assignee); a.done++; seen(a, td);
+        if (tt) { hours += (td - tt) / 3600000; hoursN++; }
+      }
+      if (isOpen(t)) {
+        open++;
+        if (t.status === 'в работе' && t.assignee) ag(t.assignee).inWork++;
+        if (isOverdue(t)) { overdue++; if (t.assignee) ag(t.assignee).overdue++; }
+      }
+    });
+    const feed = log.filter((e) => inP(Date.parse(e.time))).slice(-100).reverse();
+    const agents = Object.values(by).map((a) => Object.assign({}, a, { last: a.last ? new Date(a.last).toISOString() : '' }))
+      .sort((a, b) => (b.visits + b.done) - (a.visits + a.done) || a.name.localeCompare(b.name));
+    const sum = (k) => agents.reduce((s, a) => s + a[k], 0);
+    return {
+      totals: { visits: sum('visits'), newPoints: sum('newPoints'), far: sum('far'), noGps: sum('noGps'),
+        issued, taken, done, open, overdue, avgHours: hoursN ? Math.round(hours / hoursN * 10) / 10 : null },
+      agents, feed, farMeters: FAR_METERS,
+    };
   }
 
   /* ---------- API ---------- */
@@ -99,16 +191,31 @@
       release: (id) => post('release', { id }).then((d) => d.point),
       complete: (id, form, photos, agent) => post('complete', { id, form, photos, agent: agent || me.agent }).then((d) => d.point),
       result: (id) => get('result', { id }).then((d) => d.result),
+      history: (id) => get('history', { id }).then((d) => d.visits),
       update: (id, form, photos) => post('update', { id, form, photos }).then((d) => d.point),
       remove: (id) => post('remove', { id }).then((d) => d.point),
+      tasks: (point) => get('tasks', point ? { point } : {}).then((d) => d.tasks),
+      taskCreate: (point, items, due) => post('taskCreate', { point, items, due }).then((d) => d.tasks),
+      taskTake: (id) => post('taskTake', { id }).then((d) => d.task),
+      taskRelease: (id) => post('taskRelease', { id }).then((d) => d.task),
+      taskDone: (id, result, photos) => post('taskDone', { id, result, photos }).then((d) => d.task),
+      taskCancel: (id) => post('taskCancel', { id, code: me.code }).then((d) => d.task),
+      managerLogin: (agent, code) => post('managerLogin', { agent, code }),
+      stats: (from) => post('stats', { from, code: me.code }).then((d) => d.stats),
     };
   }
 
-  // Демо-режим: точки из data/routes.json, статусы — в localStorage этого браузера
+  // Демо-режим: точки из data/routes.json, статусы, визиты и задания — в localStorage этого браузера
   function mockApi() {
     let base = null;
     const wait = (v) => new Promise((r) => setTimeout(() => r(v), 250));
     const state = () => store.get('mock:state', {});
+    const results = () => store.get('mock:results', []);
+    const tasksDb = () => store.get('mock:tasks', []);
+    const logDb = () => store.get('mock:log', []);
+    const log = (agent, action, id, details) => {
+      store.set('mock:log', logDb().concat([{ time: new Date().toISOString(), agent, action, id, details }]).slice(-500));
+    };
     const load = async () => base || (base = await fetch('data/routes.json').then((r) => r.json()));
     const all = async () => {
       const s = state();
@@ -116,24 +223,27 @@
       (await load()).routes.forEach((r) => r.points.forEach((p) => {
         const st = s[p.id] || {};
         out.push(Object.assign({ route: r.route, lat: null, lon: null, acc: p.lat != null ? 'точно' : '' }, p,
-          { status: st.status || 'свободна', agent: st.agent || '' }));
+          { status: st.status || 'свободна', agent: st.agent || '', visits: st.visits || 0, lastVisit: fmtTime(st.last) }));
       }));
       return out;
     };
     const fail = (m) => { const e = new Error(m); e.server = true; throw e; };
-    const setState = async (id, status, agent) => {
+    const find = async (id) => (await all()).find((x) => x.id === id) || fail('Точка не найдена');
+    const setState = async (id, patch) => {
       const s = state();
-      if (status === 'свободна') delete s[id]; else s[id] = { status, agent };
+      const cur = Object.assign({}, s[id], patch);
+      if (cur.status === 'свободна') delete s[id]; else s[id] = cur;
       store.set('mock:state', s);
-      return (await all()).find((p) => p.id === id);
+      return find(id);
     };
-    const check = async (id, agent) => {
-      const p = (await all()).find((x) => x.id === id);
-      if (!p) fail('Точка не найдена');
-      if (p.status === 'выполнена') fail('Точка уже выполнена (' + p.agent + ')');
-      if (p.status === 'в работе' && p.agent !== agent) fail('Точку уже взял(а): ' + p.agent);
-      return p;
+    const changeTask = (id, fn) => {
+      const db = tasksDb();
+      const t = db.find((x) => x.id === id) || fail('Задание не найдено');
+      fn(t);
+      store.set('mock:tasks', db);
+      return wait(t);
     };
+    const lastResult = (id) => results().filter((x) => x.id === id).pop();
     return {
       ping: () => wait({ ok: true }),
       summary: async () => {
@@ -147,43 +257,120 @@
         return wait(Object.values(by));
       },
       points: async (route) => wait((await all()).filter((p) => p.route === Number(route))),
-      claim: async (id) => { await check(id, me.agent); return wait(await setState(id, 'в работе', me.agent)); },
+      claim: async (id) => {
+        const p = await find(id);
+        if (p.status === 'выполнена') fail('Точка уже выполнена (' + p.agent + ')');
+        if (p.status === 'в работе' && p.agent !== me.agent) fail('Точку уже взял(а): ' + p.agent);
+        log(me.agent, 'взял точку', id, p.name);
+        return wait(await setState(id, { status: 'в работе', agent: me.agent }));
+      },
       release: async (id) => {
-        const p = (await all()).find((x) => x.id === id);
-        if (!p || p.status !== 'в работе' || p.agent !== me.agent) fail('Эта точка не у вас в работе');
-        return wait(await setState(id, 'свободна', ''));
+        const p = await find(id);
+        if (p.status !== 'в работе' || p.agent !== me.agent) fail('Эта точка не у вас в работе');
+        log(me.agent, 'освободил точку', id, p.name);
+        return wait(await setState(id, { status: 'свободна', agent: '' }));
       },
       complete: async (id, form, photos, agent) => {
         const who = agent || me.agent;
-        await check(id, who);
-        const log = store.get('mock:results', []);
-        log.push({ id, agent: who, time: new Date().toISOString(), form, photos: photos.length });
-        store.set('mock:results', log);
-        return wait(await setState(id, 'выполнена', who));
+        const p = await find(id);
+        if (p.status === 'в работе' && p.agent !== who) fail('Точку уже взял(а): ' + p.agent);
+        const list = results();
+        if (form.uid && list.some((r) => r.id === id && r.form.uid === form.uid)) return wait(p);
+        const f = Object.assign({}, form);
+        const geo = f.geo;
+        delete f.geo;
+        const distance = geo && hasCoords(p) ? Math.round(km(geo, p) * 1000) : '';
+        const visit = (p.visits || (p.status === 'выполнена' ? 1 : 0)) + 1;
+        const now = new Date().toISOString();
+        list.push({ id, agent: who, time: now, form: f, photos: photos.length, visit, distance, gps: !!geo });
+        store.set('mock:results', list);
+        log(who, visit > 1 ? 'повторный визит' : 'визит', id,
+          p.name + (distance !== '' ? ' · ' + distance + ' м от точки' : geo ? ' · GPS отмечен' : ' · без GPS'));
+        return wait(await setState(id, { status: 'выполнена', agent: who, visits: visit, last: now }));
       },
       result: async (id) => {
-        const r = store.get('mock:results', []).filter((x) => x.id === id).pop();
+        const r = lastResult(id);
         if (!r) return wait(null);
         const out = Object.assign({}, r.form, { photos: Array(r.photos).fill('photo').join('\n') });
         ['assortment', 'competitors', 'ourBrands'].forEach((k) => { if (Array.isArray(out[k])) out[k] = out[k].join(', '); });
         return wait(out);
       },
+      history: async (id) => wait(results().filter((x) => x.id === id).map((r, i) => ({
+        visit: r.visit || i + 1, time: fmtTime(r.time), agent: r.agent, interest: r.form.interest,
+        nextStep: r.form.nextStep, comment: r.form.comment, distance: r.distance == null ? '' : r.distance,
+        gps: !!r.gps, photos: r.photos,
+      }))),
       update: async (id, form, photos) => {
-        const p = (await all()).find((x) => x.id === id);
-        if (!p || p.status !== 'выполнена') fail('Точка ещё не выполнена');
-        const log = store.get('mock:results', []);
-        const r = log.filter((x) => x.id === id).pop();
-        r.form = form;
+        const p = await find(id);
+        if (p.status !== 'выполнена') fail('Точка ещё не выполнена');
+        const log2 = results();
+        const r = log2.filter((x) => x.id === id).pop();
+        r.form = Object.assign({}, form, { uid: r.form.uid });
         r.photos += photos.length;
-        store.set('mock:results', log);
+        store.set('mock:results', log2);
+        log(me.agent, 'изменил анкету', id, p.name);
         return wait(p);
       },
       remove: async (id) => {
-        const p = (await all()).find((x) => x.id === id);
-        if (!p || p.status !== 'выполнена') fail('Точка ещё не выполнена');
-        store.set('mock:results', store.get('mock:results', []).filter((x) => x.id !== id));
-        return wait(await setState(id, 'свободна', ''));
+        const p = await find(id);
+        if (p.status !== 'выполнена') fail('Точка ещё не выполнена');
+        const list = results();
+        const i = list.map((x) => x.id).lastIndexOf(id);
+        list.splice(i, 1);
+        store.set('mock:results', list);
+        log(me.agent, 'удалил анкету', id, p.name);
+        const prev = list.filter((x) => x.id === id).pop();
+        return wait(await setState(id, prev
+          ? { agent: prev.agent, visits: Math.max(1, (p.visits || 1) - 1) }
+          : { status: 'свободна', agent: '', visits: 0, last: '' }));
       },
+      tasks: async (point) => wait(tasksDb().filter((t) => !point || t.point === point)),
+      taskCreate: async (point, items, due) => {
+        const p = await find(point);
+        if (!items.length) fail('Выберите хотя бы одно задание');
+        const db = tasksDb();
+        const now = new Date().toISOString();
+        const stamp = Date.now().toString(36);
+        items.forEach((it, i) => {
+          const t = { id: 'T' + stamp + '-' + (i + 1), point, route: p.route, name: p.name, address: p.address,
+            type: it.type, comment: it.comment || '', due: due || '', author: me.agent, created: now,
+            status: 'новое', assignee: '', taken: '', done: '', result: '', photos: '' };
+          db.push(t);
+          log(me.agent, 'выдал задание', t.id, t.type + ' — ' + t.name + (due ? ' · срок ' + due : ''));
+        });
+        store.set('mock:tasks', db);
+        return wait(db.filter((t) => t.point === point));
+      },
+      taskTake: (id) => changeTask(id, (t) => {
+        if (t.status === 'в работе' && t.assignee !== me.agent) fail('Задание уже взял(а): ' + t.assignee);
+        if (!isOpen(t)) fail('Задание уже ' + t.status);
+        Object.assign(t, { status: 'в работе', assignee: me.agent, taken: new Date().toISOString() });
+        log(me.agent, 'взял задание', id, t.type + ' — ' + t.name);
+      }),
+      taskRelease: (id) => changeTask(id, (t) => {
+        if (t.status !== 'в работе' || t.assignee !== me.agent) fail('Это задание не у вас в работе');
+        Object.assign(t, { status: 'новое', assignee: '', taken: '' });
+        log(me.agent, 'отказался от задания', id, t.type + ' — ' + t.name);
+      }),
+      taskDone: (id, result, photos) => changeTask(id, (t) => {
+        if (t.status === 'в работе' && t.assignee !== me.agent) fail('Задание выполняет: ' + t.assignee);
+        if (!isOpen(t)) fail('Задание уже ' + t.status);
+        const now = new Date().toISOString();
+        Object.assign(t, { status: 'выполнено', assignee: me.agent, taken: t.taken || now, done: now,
+          result: result || '', photos: photos.map((_, i) => 'фото ' + (i + 1)).join('\n') });
+        log(me.agent, 'выполнил задание', id, t.type + ' — ' + t.name + (photos.length ? ' · фото ' + photos.length : ''));
+      }),
+      taskCancel: (id) => changeTask(id, (t) => {
+        if (t.author !== me.agent && !isManager()) fail('Отменить может автор задания или руководитель');
+        if (t.status === 'выполнено') fail('Задание уже выполнено');
+        t.status = 'отменено';
+        log(me.agent, 'отменил задание', id, t.type + ' — ' + t.name);
+      }),
+      // В демо подходит любой код — настоящий проверяется только в Apps Script
+      managerLogin: async (agent, code) => wait(code ? { ok: true } : fail('Введите код')),
+      stats: async (from) => wait(computeStats(from,
+        results().map((r) => ({ agent: r.agent, t: Date.parse(r.time), visit: r.visit || 1, distance: r.distance, gps: !!r.gps })),
+        tasksDb(), logDb())),
     };
   }
 
@@ -229,15 +416,16 @@
     const back = $('back');
     back.hidden = !backHash;
     back.onclick = () => { location.hash = backHash; };
+    $('logo').hidden = !!backHash;
     const who = $('who');
     who.hidden = !me.agent;
-    who.textContent = me.agent;
+    who.textContent = me.agent + (isManager() ? ' · рук.' : '');
   }
 
   $('who').onclick = () => {
-    if (confirm('Сменить агента «' + me.agent + '»?')) {
-      me.agent = '';
-      store.del('agent');
+    if (confirm('Выйти из «' + me.agent + '»?')) {
+      me.agent = ''; me.role = ''; me.code = '';
+      store.del('agent'); store.del('role'); store.del('mcode');
       route();
     }
   };
@@ -253,6 +441,10 @@
     let m;
     if ((m = h.match(/^r\/(\d+)$/))) return listView(Number(m[1]));
     if ((m = h.match(/^p\/(R\d+-\d+)$/))) return pointView(m[1]);
+    if ((m = h.match(/^give\/(R\d+-\d+)$/))) return giveView(m[1]);
+    if ((m = h.match(/^td\/(T[\w-]+)$/))) return taskDoneView(m[1]);
+    if (h === 'tasks') return tasksView();
+    if (h === 'stats') return statsView();
     return homeView();
   }
 
@@ -264,33 +456,85 @@
 
   /* ---------- Вход ---------- */
   function loginView() {
-    setBar('Alina 2ГИС');
+    setBar('Alina Sales');
+    const mgr = ui.loginMgr;
     $app.innerHTML = `
+      <div class="hero"><img src="icons/alina-logo.svg" alt="Alina Group"><p>Торговая команда</p></div>
       <div class="card">
-        <h2>Отработка базы 2ГИС</h2>
-        <p class="muted">Alina Group. Укажите своё имя — по нему видно, кто взял точку.</p>
+        <h2>${mgr ? 'Вход для руководителя' : 'Вход'}</h2>
+        <p class="muted">${mgr ? 'Руководитель видит статистику команды, все задания и ленту действий агентов.'
+          : 'Укажите своё имя — по нему видно, кто взял точку или задание.'}</p>
         <form id="login">
           <div class="field"><label for="agent">Имя и фамилия</label>
             <input type="text" id="agent" autocomplete="name" required value="${esc(store.get('lastAgent', ''))}"></div>
-          <button class="btn primary" type="submit">Войти</button>
+          ${mgr ? `<div class="field"><label for="code">Код руководителя</label>
+            <input type="password" id="code" inputmode="numeric" autocomplete="off" required></div>` : ''}
+          <button class="btn primary" type="submit" id="loginBtn">Войти</button>
         </form>
+        <button class="link-btn" id="mode">${mgr ? '← Вход для агента' : 'Вход для руководителя'}</button>
       </div>`;
-    $('login').onsubmit = (ev) => {
+    $('mode').onclick = () => { ui.loginMgr = !mgr; loginView(); };
+    $('login').onsubmit = async (ev) => {
       ev.preventDefault();
       const agent = $('agent').value.trim().replace(/\s+/g, ' ');
       if (!agent) return;
+      if (mgr) {
+        const code = $('code').value.trim();
+        const btn = $('loginBtn');
+        btn.disabled = true;
+        btn.textContent = 'Проверка…';
+        try {
+          await api.managerLogin(agent, code);
+        } catch (e) {
+          toast(e.server ? e.message : 'Нет связи', true);
+          btn.disabled = false;
+          btn.textContent = 'Войти';
+          return;
+        }
+        me.role = 'manager'; me.code = code;
+        store.set('role', 'manager'); store.set('mcode', code);
+      } else {
+        me.role = ''; me.code = '';
+        store.del('role'); store.del('mcode');
+      }
       me.agent = agent;
       store.set('agent', agent);
       store.set('lastAgent', agent);
+      ui.loginMgr = false;
       route();
     };
   }
 
-  /* ---------- Маршруты ---------- */
+  /* ---------- Главная: задания, статистика, маршруты ---------- */
+  async function loadTasks() {
+    const ts = await api.tasks();
+    cache.tasks = ts;
+    store.set('cache:tasks', ts);
+    return ts;
+  }
+  function updateCachedTask(t) {
+    if (!t || !cache.tasks) return;
+    const i = cache.tasks.findIndex((x) => x.id === t.id);
+    if (i >= 0) cache.tasks[i] = t; else cache.tasks.push(t);
+    store.set('cache:tasks', cache.tasks);
+  }
+
   function homeView() {
     setBar('Маршруты');
+    const isHome = () => location.hash.replace(/^#\/?/, '') === '';
+    const navHtml = () => {
+      const c = cache.tasks ? taskCounts(cache.tasks) : null;
+      return `<a class="card nav-card" href="#/tasks">
+          <div class="row"><h2 class="grow">📋 Задания</h2><span class="muted">›</span></div>
+          <div class="stats">${c ? `<span>Свободных <b>${c.free}</b></span><span>Мои <b>${c.mine}</b></span>` +
+            (c.overdue ? `<span class="bad">Просрочено <b>${c.overdue}</b></span>` : '') : '<span>Загрузка…</span>'}</div>
+        </a>` +
+        (isManager() ? `<a class="card nav-card mgr" href="#/stats">
+          <div class="row"><h2 class="grow">📊 Статистика команды</h2><span class="muted">›</span></div>
+          <div class="muted">Визиты, задания и лента действий агентов</div></a>` : '');
+    };
     const render = (routes) => {
-      $app.innerHTML = routes.map((r) => {
+      $app.innerHTML = navHtml() + '<div class="section-title">Маршруты</div>' + (routes ? routes.map((r) => {
         const pd = r.total ? (r.done / r.total) * 100 : 0;
         const pw = r.total ? (r.work / r.total) * 100 : 0;
         return `<a class="card route-card" href="#/r/${r.route}">
@@ -299,15 +543,18 @@
           <div class="progress"><div class="done" style="width:${pd}%"></div><div class="work" style="width:${pw}%"></div></div>
           <div class="stats"><span>Выполнено <b>${r.done}</b></span><span>В работе <b>${r.work}</b></span><span>Свободно <b>${r.free}</b></span></div>
         </a>`;
-      }).join('') + '<p class="muted" style="text-align:center">Старт: Алматы, Казыбаева 20</p>';
+      }).join('') + '<p class="muted" style="text-align:center">Старт: Алматы, Казыбаева 20</p>' : '<div class="spinner">Загрузка…</div>');
     };
-    if (cache.summary) render(cache.summary); else $app.innerHTML = '<div class="spinner">Загрузка…</div>';
-    const load = () => api.summary().then((routes) => {
-      routes.sort((a, b) => a.route - b.route);
-      cache.summary = routes;
-      store.set('cache:summary', routes);
-      if (location.hash.replace(/^#\/?/, '') === '') render(routes);
-    }).catch((e) => { if (!cache.summary) showError(e, homeView); else toast('Нет связи', true); });
+    render(cache.summary);
+    const load = () => {
+      api.summary().then((routes) => {
+        routes.sort((a, b) => a.route - b.route);
+        cache.summary = routes;
+        store.set('cache:summary', routes);
+        if (isHome()) render(routes);
+      }).catch((e) => { if (!cache.summary) showError(e, homeView); else toast('Нет связи', true); });
+      loadTasks().then(() => { if (isHome() && cache.summary) render(cache.summary); }).catch(() => {});
+    };
     load();
     currentLoad = load;
     refreshTimer = setInterval(load, 60000);
@@ -333,6 +580,7 @@
       else if (p.status === 'выполнена') badge = `<span class="badge done">✓ ${esc(p.agent)}</span>`;
       else if (mine) badge = '<span class="badge work">у вас в работе</span>';
       else if (p.status === 'в работе') badge = `<span class="badge work">взял(а): ${esc(p.agent)}</span>`;
+      if (p.visits > 1) badge += `<span class="badge info">🔁 ${p.visits}</span>`;
       const dist = ui.pos && hasCoords(p) ? `<span class="dist">${km(ui.pos, p).toFixed(1)} км</span>` : '';
       return `<a class="card point${mine ? ' mine' : ''}" href="#/p/${p.id}">
         <span class="num">${p.n}</span>
@@ -406,10 +654,36 @@
       { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 });
   }
 
+  /* ---------- Фото ---------- */
+  function bindPhotos(input, box, list, max) {
+    const draw = () => {
+      box.innerHTML = list.map((src, i) => `<div class="ph"><img src="${src}" alt=""><button type="button" data-i="${i}">×</button></div>`).join('');
+      box.querySelectorAll('button').forEach((b) => { b.onclick = () => { list.splice(Number(b.dataset.i), 1); draw(); }; });
+    };
+    input.onchange = async (ev) => {
+      const files = Array.from(ev.target.files || []);
+      ev.target.value = '';
+      for (const file of files) {
+        if (list.length >= max) { toast('Не больше ' + max + ' фото', true); break; }
+        try { list.push(await compress(file)); } catch (e) { toast('Не удалось прочитать фото', true); }
+      }
+      draw();
+    };
+    draw();
+  }
+
   /* ---------- Точка ---------- */
   function chips(name, options, type, values) {
     return '<div class="chips">' + options.map((o) => `<label><input type="${type}" name="${name}" value="${esc(o)}"
       ${values.indexOf(o) >= 0 ? 'checked' : ''}>${esc(o)}</label>`).join('') + '</div>';
+  }
+
+  async function loadPoint(id) {
+    const routeNo = routeOf(id);
+    let p = (cachedPoints(routeNo) || []).find((x) => x.id === id);
+    if (!p) p = (await loadPoints(routeNo)).find((x) => x.id === id);
+    if (!p) throw new Error('Точка не найдена');
+    return p;
   }
 
   async function pointView(id) {
@@ -419,20 +693,52 @@
     let p = (cachedPoints(routeNo) || []).find((x) => x.id === id);
     if (!p) {
       $app.innerHTML = '<div class="spinner">Загрузка…</div>';
-      try { p = (await loadPoints(routeNo)).find((x) => x.id === id); } catch (e) { return showError(e, () => pointView(id)); }
-      if (!p) return showError(new Error('Точка не найдена'), () => { location.hash = '#/r/' + routeNo; });
+      try { p = await loadPoint(id); } catch (e) { return showError(e, () => pointView(id)); }
     }
     let photos = [];
     let editing = null; // значения анкеты, когда автор её редактирует
+    let revisit = null; // новый визит на выполненную точку: контакты из прошлой анкеты
+    let history = null; // визиты точки, когда история открыта
+    let ptasks = null;
     renderPoint();
     // Актуальный статус с сервера
     loadPoints(routeNo).then((pts) => {
       const fresh = pts.find((x) => x.id === id);
-      if (fresh && location.hash === hash && (fresh.status !== p.status || fresh.agent !== p.agent)) {
+      if (fresh && location.hash === hash && !editing && !revisit &&
+        (fresh.status !== p.status || fresh.agent !== p.agent || fresh.visits !== p.visits)) {
         p = fresh;
         renderPoint();
       }
     }).catch(() => {});
+    loadPointTasks();
+
+    function loadPointTasks() {
+      api.tasks(id).then((ts) => {
+        ptasks = ts;
+        ts.forEach(updateCachedTask);
+        if (location.hash === hash) drawTasks();
+      }).catch(() => {});
+    }
+
+    function drawTasks() {
+      const box = $('ptasks');
+      if (!box || !ptasks) return;
+      const list = ptasks.filter((t) => t.status !== 'отменено').sort(taskSort);
+      box.innerHTML = list.length ? '<div class="section-title">Задания по точке</div>' +
+        list.map((t) => taskCard(t, { noPoint: true })).join('') : '';
+      bindTaskActions(box, loadPointTasks);
+    }
+
+    function drawHistory() {
+      const box = $('histbox');
+      if (!box || !history) return;
+      box.innerHTML = history.length ? '<ul class="history">' + history.slice().reverse().map((v) => `<li>
+          <b>Визит ${v.visit}</b> · ${esc(v.time)} · ${esc(v.agent)}
+          ${v.interest ? `<div class="muted">Интерес: ${esc(v.interest)}${v.distance !== '' && v.distance != null
+            ? ` · ${v.distance > FAR_METERS ? '⚠️ ' : ''}${esc(v.distance)} м от точки` : v.gps ? ' · 📍 GPS отмечен' : ' · без GPS'}</div>` : ''}
+          ${v.nextStep ? `<div>${esc(v.nextStep)}</div>` : ''}
+        </li>`).join('') + '</ul>' : '<div class="muted">Визитов нет</div>';
+    }
 
     function renderPoint() {
       const draft = store.get('draft:' + id, {});
@@ -440,14 +746,16 @@
       const other = p.status === 'в работе' && !mine;
       const done = p.status === 'выполнена';
       const pending = isPending(id);
-      const canFill = (!other && !done && !pending) || !!editing;
+      const canFill = (!other && !done && !pending) || !!editing || !!revisit;
       const ownDone = done && !pending;
-      const src = editing || draft;
+      const src = editing || (revisit ? Object.assign({}, revisit, draft) : draft);
 
       let status = '';
       if (pending) status = '<div class="status-box work">Анкета сохранена и ждёт отправки (нет связи)</div>';
-      else if (done) status = `<div class="status-box done">✓ Выполнена — ${esc(p.agent)}</div>`;
-      else if (other) status = `<div class="status-box other">Точку взял(а): ${esc(p.agent)}</div>`;
+      else if (done) {
+        status = `<div class="status-box done">✓ Выполнена — ${esc(p.agent)}${p.visits > 1 ? ` · визитов: ${p.visits}` : ''}
+          ${p.lastVisit ? `<div class="muted" style="font-weight:400">Последний визит: ${esc(p.lastVisit)}</div>` : ''}</div>`;
+      } else if (other) status = `<div class="status-box other">Точку взял(а): ${esc(p.agent)}</div>`;
       else if (mine) status = '<div class="status-box work">У вас в работе</div>';
 
       // Телефоны точки (если есть в базе) подставляются в анкету по умолчанию
@@ -457,6 +765,7 @@
         p.phone ? `<a href="tel:${esc(telDigits(p.phone))}">📞 ${esc(p.phone)}</a>` : '',
         waUrl(p.whatsapp) ? `<a href="${waUrl(p.whatsapp)}" target="_blank" rel="noopener">💬 WhatsApp</a>` : '',
       ].filter(Boolean).join(' &nbsp; ');
+      const formTitle = editing ? 'Изменение анкеты' : revisit ? 'Новый визит' : 'Анкета точки';
       $app.innerHTML = `
         <div class="card">
           <div class="muted">№ ${p.n} · ${esc(p.type)}</div>
@@ -473,13 +782,19 @@
           ${!done && !other && !pending ? (mine
             ? '<button class="btn ghost" id="release">Отказаться от точки</button>'
             : '<button class="btn" id="claim">Беру в работу</button>') : ''}
-          ${ownDone && !editing ? `<div class="btns">
-            <button class="btn" id="edit">✏️ Изменить анкету</button>
-            <button class="btn ghost" id="remove">🗑 Удалить анкету</button></div>` : ''}
+          ${ownDone && !editing && !revisit ? `<div class="btns">
+            <a class="btn blue wide" href="#/give/${id}">📋 Дать задание</a>
+            <button class="btn wide" id="revisit">🔁 Новый визит</button>
+            <button class="btn ghost" id="edit">✏️ Изменить</button>
+            <button class="btn ghost" id="remove">🗑 Удалить</button></div>
+            <button class="link-btn" id="hist">${history ? 'Скрыть историю' : 'История визитов (' + (p.visits || 1) + ')'}</button>
+            <div id="histbox"></div>` : ''}
+          ${!done && !pending ? `<a class="btn ghost" href="#/give/${id}" style="margin-top:8px">📋 Дать задание</a>` : ''}
         </div>
+        <div id="ptasks"></div>
         ${canFill ? `
         <form class="card" id="f" autocomplete="off">
-          <h2 style="margin-bottom:12px">${editing ? 'Изменение анкеты' : 'Анкета точки'}</h2>
+          <h2 style="margin-bottom:12px">${formTitle}</h2>
           <div class="field"><label>Контактное лицо</label><input type="text" name="contact" value="${d('contact')}"></div>
           <div class="field"><label>Должность</label><input type="text" name="position" placeholder="владелец, продавец, закупщик…" value="${d('position')}"></div>
           <div class="field"><label>Телефон</label><input type="tel" name="phone" placeholder="+7" value="${d('phone')}"></div>
@@ -499,8 +814,9 @@
             <label class="btn ghost file-btn">📷 Добавить фото<input type="file" id="photo" accept="image/*" multiple></label>
             ${editing && editing.photoCount ? `<div class="muted">Уже загружено фото: ${editing.photoCount}. Новые добавятся к ним.</div>` : ''}
             <div class="photos" id="photos"></div></div>
+          ${editing ? '' : '<p class="muted">📍 При отправке отметится ваше местоположение — так видно, что визит был на точке.</p>'}
           <button class="btn ok" type="submit" id="submit">${editing ? '💾 Сохранить изменения' : '✓ Выполнено — отправить'}</button>
-          ${editing ? '<button class="btn ghost" type="button" id="cancelEdit" style="margin-top:8px">Отмена</button>' : ''}
+          ${editing || revisit ? '<button class="btn ghost" type="button" id="cancelEdit" style="margin-top:8px">Отмена</button>' : ''}
         </form>` : ''}`;
 
       $('go').onclick = () => openRoute(p);
@@ -511,32 +827,29 @@
       const byOther = p.agent && p.agent !== me.agent ? 'Анкету заполнил(а) ' + p.agent + '. ' : '';
       if ($('edit')) $('edit').onclick = (ev) => { if (!byOther || confirm(byOther + 'Изменить её?')) startEdit(ev.target); };
       if ($('remove')) $('remove').onclick = (ev) => {
-        if (confirm(byOther + 'Удалить анкету? Точка снова станет свободной, фото уйдут в корзину Google Диска.')) {
+        const what = p.visits > 1 ? 'Удалить анкету последнего визита?' : 'Удалить анкету? Точка снова станет свободной.';
+        if (confirm(byOther + what + ' Фото уйдут в корзину Google Диска.')) {
+          history = null;
           act(ev.target, () => api.remove(id), 'Анкета удалена');
         }
       };
-      if ($('cancelEdit')) $('cancelEdit').onclick = () => { editing = null; photos = []; renderPoint(); };
+      if ($('revisit')) $('revisit').onclick = (ev) => startRevisit(ev.target);
+      if ($('hist')) $('hist').onclick = () => toggleHistory();
+      drawHistory();
+      drawTasks();
+      if ($('cancelEdit')) $('cancelEdit').onclick = () => { editing = null; revisit = null; photos = []; renderPoint(); };
       const f = $('f');
       if (!f) return;
       f.oninput = () => { if (!editing) store.set('draft:' + id, readForm(f)); };
-      $('photo').onchange = async (ev) => {
-        const files = Array.from(ev.target.files || []);
-        ev.target.value = '';
-        for (const file of files) {
-          if (photos.length >= 6) { toast('Не больше 6 фото', true); break; }
-          try { photos.push(await compress(file)); } catch (e) { toast('Не удалось прочитать фото', true); }
-        }
-        drawPhotos();
-      };
-      drawPhotos();
+      bindPhotos($('photo'), $('photos'), photos, 6);
       f.onsubmit = (ev) => { ev.preventDefault(); submit(f); };
     }
 
-    function drawPhotos() {
-      const box = $('photos');
-      if (!box) return;
-      box.innerHTML = photos.map((src, i) => `<div class="ph"><img src="${src}" alt=""><button type="button" data-i="${i}">×</button></div>`).join('');
-      box.querySelectorAll('button').forEach((b) => { b.onclick = () => { photos.splice(Number(b.dataset.i), 1); drawPhotos(); }; });
+    async function toggleHistory() {
+      if (history) { history = null; renderPoint(); return; }
+      $('hist').disabled = true;
+      try { history = await api.history(id); } catch (e) { toast(e.server ? e.message : 'Нет связи', true); }
+      if (location.hash === hash) renderPoint();
     }
 
     async function act(btn, fn, okMsg) {
@@ -566,6 +879,21 @@
       if (editing && $('f')) $('f').scrollIntoView();
     }
 
+    // Новый визит: контакты и поставщик берутся из последней анкеты, остальное заполняется заново
+    async function startRevisit(btn) {
+      btn.disabled = true;
+      let base = {};
+      try {
+        const r = await api.result(id);
+        if (r) ['contact', 'position', 'phone', 'whatsapp', 'instagram', 'supplier', 'alina']
+          .forEach((k) => { if (r[k]) base[k] = r[k]; });
+      } catch (e) { base = {}; }
+      revisit = base;
+      photos = [];
+      if (location.hash === hash) renderPoint();
+      if ($('f')) $('f').scrollIntoView();
+    }
+
     async function submit(f) {
       const form = readForm(f);
       if (!form.interest) return toast('Отметьте интерес к сотрудничеству', true);
@@ -582,6 +910,7 @@
           updateCached(p);
           editing = null;
           photos = [];
+          history = null;
           toast('Изменения сохранены');
         } catch (e) {
           toast(e.server ? e.message : 'Нет связи, изменения не сохранены', true);
@@ -593,13 +922,20 @@
         return;
       }
       btn.disabled = true;
+      btn.textContent = '📍 Определяем местоположение…';
+      // uid защищает от двойного визита, если ответ сервера потерялся и анкета ушла повторно из очереди
+      form.uid = id + '-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+      form.geo = await getGeo();
       btn.textContent = 'Отправка…';
       try {
         p = await api.complete(id, form, photos);
         updateCached(p);
         store.del('draft:' + id);
-        toast('Готово! Точка выполнена');
-        location.hash = '#/r/' + routeNo;
+        revisit = null;
+        photos = [];
+        history = null;
+        toast('Визит сохранён — можно дать задание по точке');
+        if (location.hash === hash) { renderPoint(); window.scrollTo(0, 0); }
       } catch (e) {
         if (e.server) {
           toast(e.message, true);
@@ -656,6 +992,294 @@
       else data[k] = String(v).trim();
     });
     return data;
+  }
+
+  /* ---------- Дать задание ---------- */
+  async function giveView(id) {
+    setBar('Дать задание', '#/p/' + id);
+    const hash = location.hash;
+    let p;
+    try { p = await loadPoint(id); } catch (e) { return showError(e, () => giveView(id)); }
+    if (location.hash !== hash) return;
+    const due = ymd(new Date(Date.now() + 3 * 86400000));
+    $app.innerHTML = `
+      <div class="card">
+        <div class="muted">Маршрут ${p.route} · № ${p.n}</div>
+        <h2>${esc(p.name)}</h2>
+        <div class="muted">${esc(cleanAddr(p.address))}</div>
+      </div>
+      <form class="card" id="gf" autocomplete="off">
+        <h2 style="margin-bottom:4px">Задания по точке</h2>
+        <p class="muted" style="margin-top:0">Отметьте одно или несколько и добавьте комментарий. Задание увидит вся команда — кто возьмёт, за тем и закрепится.</p>
+        ${TASK_TYPES.map((t, i) => `<div class="task-pick">
+          <label><input type="checkbox" name="type" value="${i}">${esc(t)}</label>
+          <textarea name="c${i}" placeholder="Комментарий к заданию"></textarea></div>`).join('')}
+        <div class="field" style="margin-top:14px"><label for="due">Срок выполнения</label>
+          <input type="date" id="due" name="due" value="${due}" min="${today()}"></div>
+        <button class="btn primary" type="submit" id="gsubmit">📋 Дать задание</button>
+      </form>`;
+    const f = $('gf');
+    f.querySelectorAll('input[name=type]').forEach((cb) => {
+      cb.onchange = () => { if (cb.checked) f.elements['c' + cb.value].focus(); };
+    });
+    f.onsubmit = async (ev) => {
+      ev.preventDefault();
+      const items = Array.from(f.querySelectorAll('input[name=type]:checked'))
+        .map((cb) => ({ type: TASK_TYPES[cb.value], comment: f.elements['c' + cb.value].value.trim() }));
+      if (!items.length) return toast('Отметьте хотя бы одно задание', true);
+      const btn = $('gsubmit');
+      btn.disabled = true;
+      btn.textContent = 'Отправка…';
+      try {
+        const ts = await api.taskCreate(id, items, f.elements.due.value);
+        ts.forEach(updateCachedTask);
+        toast('Выдано заданий: ' + items.length);
+        location.hash = '#/p/' + id;
+      } catch (e) {
+        toast(e.server ? e.message : 'Нет связи, попробуйте ещё раз', true);
+        btn.disabled = false;
+        btn.textContent = '📋 Дать задание';
+      }
+    };
+  }
+
+  /* ---------- Задания ---------- */
+  function taskCard(t, opts) {
+    opts = opts || {};
+    const od = isOverdue(t);
+    const mine = t.status === 'в работе' && t.assignee === me.agent;
+    const canCancel = isOpen(t) && (t.author === me.agent || isManager());
+    let status = '';
+    if (t.status === 'новое') status = '<span class="badge info">свободно</span>';
+    else if (mine) status = '<span class="badge work">у вас в работе</span>';
+    else if (t.status === 'в работе') status = `<span class="badge work">выполняет: ${esc(t.assignee)}</span>`;
+    else if (t.status === 'выполнено') status = `<span class="badge done">✓ ${esc(t.assignee)} · ${fmtTime(t.done)}</span>`;
+    else status = '<span class="badge">отменено</span>';
+    if (od) status += '<span class="badge bad">просрочено</span>';
+    const idAttr = `data-id="${esc(t.id)}"`;
+    let acts = '';
+    if (t.status === 'новое') {
+      acts = `<button class="btn small" data-act="take" ${idAttr}>Беру себе</button>
+        <button class="btn small ok" data-act="done" ${idAttr}>✓ Выполнено</button>`;
+    } else if (mine) {
+      acts = `<button class="btn small ok" data-act="done" ${idAttr}>✓ Выполнено</button>
+        <button class="btn small ghost" data-act="release" ${idAttr}>Отказаться</button>`;
+    }
+    if (canCancel) acts += `<button class="btn small ghost wide" data-act="cancel" ${idAttr}>Отменить задание</button>`;
+    if (opts.noActions) acts = '';
+    const photos = String(t.photos || '').split(/\n+/).filter(Boolean);
+    const photoHtml = photos.map((u, i) => /^https?:/.test(u)
+      ? ` <a href="${esc(u)}" target="_blank" rel="noopener">📷 фото ${i + 1}</a>` : ` 📷 ${esc(u)}`).join('');
+    return `<div class="card task${od ? ' overdue' : ''}">
+      <div class="type">${esc(t.type)}</div>
+      ${opts.noPoint ? '' : `<a class="task-link" href="#/p/${esc(t.point)}">📍 ${esc(t.name)}</a>
+        <div class="meta">${esc(cleanAddr(t.address))}</div>`}
+      ${t.comment ? `<div class="comment">💬 ${esc(t.comment)}</div>` : ''}
+      <div class="meta">Выдал(а) ${esc(t.author)} · ${fmtTime(t.created)}${t.due
+        ? ` · срок <b${od ? ' style="color:var(--bad)"' : ''}>${fmtDue(t.due)}</b>` : ''}</div>
+      <div style="margin-top:6px">${status}</div>
+      ${t.result || photos.length ? `<div class="result">${esc(t.result)}${photoHtml}</div>` : ''}
+      ${acts ? `<div class="btns">${acts}</div>` : ''}
+    </div>`;
+  }
+
+  function bindTaskActions(box, after) {
+    box.querySelectorAll('[data-act]').forEach((b) => {
+      b.onclick = async (ev) => {
+        ev.preventDefault();
+        const id = b.dataset.id, a = b.dataset.act;
+        if (a === 'done') { ui.taskBack = location.hash; location.hash = '#/td/' + id; return; }
+        if (a === 'release' && !confirm('Вернуть задание в свободные?')) return;
+        if (a === 'cancel' && !confirm('Отменить задание?')) return;
+        b.disabled = true;
+        try {
+          const t = await (a === 'take' ? api.taskTake(id) : a === 'release' ? api.taskRelease(id) : api.taskCancel(id));
+          updateCachedTask(t);
+          toast(a === 'take' ? 'Задание закреплено за вами' : a === 'release' ? 'Задание возвращено в свободные' : 'Задание отменено');
+        } catch (e) {
+          toast(e.server ? e.message : 'Нет связи, попробуйте ещё раз', true);
+        }
+        after();
+      };
+    });
+  }
+
+  function tasksView() {
+    setBar('Задания', '#/');
+    const hash = location.hash;
+    const tabs = [['free', 'Свободные'], ['mine', 'Мои'], ['done', 'Выполнено']].concat(isManager() ? [['all', 'Все']] : []);
+    if (!tabs.some((t) => t[0] === ui.ttab)) ui.ttab = 'free';
+
+    const render = (ts) => {
+      if (location.hash !== hash) return;
+      const q = ui.tq.trim().toLowerCase();
+      const list = ts.filter((t) => !q || [t.type, t.name, t.address, t.comment, t.author, t.assignee, t.result]
+        .join(' ').toLowerCase().includes(q)).sort(taskSort);
+      const free = list.filter((t) => t.status === 'новое');
+      const mine = list.filter((t) => t.status === 'в работе' && t.assignee === me.agent);
+      const others = list.filter((t) => t.status === 'в работе' && t.assignee !== me.agent);
+      const done = list.filter((t) => t.status === 'выполнено').sort((a, b) => String(b.done).localeCompare(String(a.done)));
+      const counts = { free: free.length, mine: mine.length, done: done.length, all: list.length };
+
+      let body = '';
+      if (ui.ttab === 'free') {
+        body = (free.length ? free.map((t) => taskCard(t)).join('') : '<div class="empty">Свободных заданий нет</div>') +
+          (others.length ? '<div class="section-title">Взяли другие</div>' + others.map((t) => taskCard(t)).join('') : '');
+      } else if (ui.ttab === 'mine') {
+        body = mine.length ? mine.map((t) => taskCard(t)).join('') : '<div class="empty">У вас нет заданий в работе. Возьмите свободное.</div>';
+      } else if (ui.ttab === 'done') {
+        body = done.length ? done.slice(0, 100).map((t) => taskCard(t)).join('') : '<div class="empty">Выполненных заданий пока нет</div>';
+      } else {
+        const people = Array.from(new Set(ts.map((t) => t.assignee).filter(Boolean))).sort();
+        const st = ui.tstatus;
+        const shown = list.filter((t) => (!ui.tagent || t.assignee === ui.tagent) &&
+          (!st || (st === 'open' ? isOpen(t) : st === 'overdue' ? isOverdue(t) : t.status === st)));
+        body = `<div class="tools">
+            <div class="field grow" style="margin:0"><select id="fst">
+              ${[['', 'Все статусы'], ['open', 'Открытые'], ['overdue', 'Просроченные'], ['новое', 'Свободные'],
+                ['в работе', 'В работе'], ['выполнено', 'Выполненные'], ['отменено', 'Отменённые']]
+                .map((o) => `<option value="${o[0]}"${o[0] === st ? ' selected' : ''}>${o[1]}</option>`).join('')}</select></div>
+            <div class="field grow" style="margin:0"><select id="fag"><option value="">Все исполнители</option>
+              ${people.map((n) => `<option${n === ui.tagent ? ' selected' : ''}>${esc(n)}</option>`).join('')}</select></div>
+          </div>` +
+          (shown.length ? shown.map((t) => taskCard(t)).join('') : '<div class="empty">Нет заданий</div>');
+      }
+
+      const searchFocused = document.activeElement && document.activeElement.id === 'tq';
+      const caret = searchFocused ? document.activeElement.selectionStart : null;
+      $app.innerHTML = `
+        <div class="tools"><input class="search" id="tq" type="search" placeholder="Поиск по точке, заданию, агенту" value="${esc(ui.tq)}"></div>
+        <div class="seg tabs">${tabs.map((t) => `<button data-ttab="${t[0]}" class="${ui.ttab === t[0] ? 'on' : ''}">${t[1]}<b>${counts[t[0]]}</b></button>`).join('')}</div>
+        <div id="tlist">${body}</div>
+        <p class="muted" style="text-align:center">Задание выдаётся на карточке точки: «📋 Дать задание».</p>`;
+      const qi = $('tq');
+      qi.oninput = () => { ui.tq = qi.value; render(ts); };
+      if (searchFocused) { qi.focus(); qi.setSelectionRange(caret, caret); }
+      $app.querySelectorAll('[data-ttab]').forEach((b) => {
+        b.onclick = () => { ui.ttab = b.dataset.ttab; store.set('ui:ttab', ui.ttab); render(ts); };
+      });
+      if ($('fst')) $('fst').onchange = (ev) => { ui.tstatus = ev.target.value; render(ts); };
+      if ($('fag')) $('fag').onchange = (ev) => { ui.tagent = ev.target.value; render(ts); };
+      bindTaskActions($('tlist'), () => render(cache.tasks || ts));
+    };
+
+    if (cache.tasks) render(cache.tasks); else $app.innerHTML = '<div class="spinner">Загрузка заданий…</div>';
+    const load = () => loadTasks().then(render)
+      .catch((e) => { if (!cache.tasks) showError(e, tasksView); else toast(e.server ? e.message : 'Нет связи — показан сохранённый список', true); });
+    load();
+    currentLoad = load;
+    refreshTimer = setInterval(() => { if (document.activeElement?.id !== 'tq') load(); }, 60000);
+  }
+
+  async function taskDoneView(id) {
+    const back = ui.taskBack || '#/tasks';
+    setBar('Выполнение задания', back);
+    const hash = location.hash;
+    let t = (cache.tasks || []).find((x) => x.id === id);
+    if (!t) {
+      $app.innerHTML = '<div class="spinner">Загрузка…</div>';
+      try { t = (await loadTasks()).find((x) => x.id === id); } catch (e) { return showError(e, () => taskDoneView(id)); }
+      if (!t) return showError(new Error('Задание не найдено'), () => { location.hash = '#/tasks'; });
+    }
+    if (location.hash !== hash) return;
+    const canClose = t.status === 'новое' || (t.status === 'в работе' && t.assignee === me.agent);
+    const draftKey = 'tdraft:' + id;
+    const photos = [];
+    $app.innerHTML = taskCard(t, { noActions: true }) +
+      (canClose ? `
+      <form class="card" id="tf" autocomplete="off">
+        <h2 style="margin-bottom:12px">Что сделано</h2>
+        <div class="field"><label>Результат <span class="req">*</span></label>
+          <textarea name="result" placeholder="Например: провёл встречу с командой, выставили Alina Paint на полку, договорились о заказе">${esc(store.get(draftKey, ''))}</textarea></div>
+        <div class="field"><span class="label">Фото результата</span>
+          <label class="btn ghost file-btn">📷 Добавить фото<input type="file" id="tphoto" accept="image/*" multiple></label>
+          <div class="photos" id="tphotos"></div></div>
+        <button class="btn ok" type="submit" id="tsubmit">✓ Задание выполнено</button>
+      </form>` : '<div class="empty">Это задание закрыть нельзя: ' + esc(t.status === 'в работе' ? 'его выполняет ' + t.assignee : 'оно ' + t.status) + '</div>');
+    const f = $('tf');
+    if (!f) return;
+    bindPhotos($('tphoto'), $('tphotos'), photos, 3);
+    f.oninput = () => store.set(draftKey, f.elements.result.value);
+    f.onsubmit = async (ev) => {
+      ev.preventDefault();
+      const result = f.elements.result.value.trim();
+      if (!result) return toast('Опишите, что сделано', true);
+      const btn = $('tsubmit');
+      btn.disabled = true;
+      btn.textContent = 'Отправка…';
+      try {
+        updateCachedTask(await api.taskDone(id, result, photos));
+        store.del(draftKey);
+        toast('Задание выполнено');
+        location.hash = back;
+      } catch (e) {
+        toast(e.server ? e.message : 'Нет связи — попробуйте ещё раз, текст сохранён', true);
+        btn.disabled = false;
+        btn.textContent = '✓ Задание выполнено';
+      }
+    };
+  }
+
+  /* ---------- Статистика (руководитель) ---------- */
+  function statsView() {
+    if (!isManager()) { location.hash = '#/'; return; }
+    setBar('Статистика', '#/');
+    const hash = location.hash;
+    const periods = [['today', 'Сегодня'], ['7', '7 дней'], ['30', '30 дней'], ['all', 'Всё время']];
+    const fromOf = (k) => {
+      if (k === 'all') return 0;
+      const d = new Date();
+      d.setHours(0, 0, 0, 0);
+      if (k !== 'today') d.setDate(d.getDate() - Number(k) + 1);
+      return d.getTime();
+    };
+
+    const render = (s) => {
+      if (location.hash !== hash) return;
+      const t = s.totals;
+      const tile = (v, label, bad) => `<div class="tile${bad && v ? ' bad' : ''}"><b>${v == null ? '—' : v}</b><span>${label}</span></div>`;
+      const pointLink = (id) => /^R\d+-\d+$/.test(id) ? ` <a href="#/p/${esc(id)}">›</a>` : '';
+      $app.innerHTML = `
+        <div class="seg tabs" style="margin-bottom:10px">${periods.map((p) =>
+          `<button data-period="${p[0]}" class="${ui.period === p[0] ? 'on' : ''}">${p[1]}</button>`).join('')}</div>
+        <div class="section-title">Визиты</div>
+        <div class="tiles">
+          ${tile(t.visits, 'визитов')}${tile(t.newPoints, 'новых точек')}
+          ${tile(t.far, 'далеко от точки (>' + s.farMeters + ' м)', true)}${tile(t.noGps, 'без GPS')}
+        </div>
+        <div class="section-title">Задания</div>
+        <div class="tiles">
+          ${tile(t.issued, 'выдано')}${tile(t.taken, 'взято в работу')}${tile(t.done, 'выполнено')}
+          ${tile(t.avgHours == null ? null : t.avgHours + ' ч', 'в среднем на задание')}
+          ${tile(t.open, 'открыто сейчас')}${tile(t.overdue, 'просрочено сейчас', true)}
+        </div>
+        <div class="section-title">По агентам</div>
+        <div class="card">${s.agents.length ? `<div class="table-wrap"><table class="grid">
+          <tr><th>Агент</th><th>Визиты</th><th>Новые</th><th>Далеко</th><th>Выдал</th><th>Взял</th><th>Сделал</th><th>В работе</th><th>Просроч.</th><th>Активность</th></tr>
+          ${s.agents.map((a) => `<tr><td>${esc(a.name)}</td><td>${a.visits}</td><td>${a.newPoints}</td>
+            <td class="${a.far ? 'bad' : ''}">${a.far}</td><td>${a.issued}</td><td>${a.taken}</td><td>${a.done}</td>
+            <td>${a.inWork}</td><td class="${a.overdue ? 'bad' : ''}">${a.overdue}</td><td>${fmtTime(a.last)}</td></tr>`).join('')}
+        </table></div>` : '<div class="muted">За этот период действий нет</div>'}</div>
+        <a class="btn ghost" href="#/tasks" id="allTasks" style="margin-bottom:10px">📋 Все задания команды</a>
+        <div class="section-title">Лента действий</div>
+        <div class="card">${s.feed.length ? '<ul class="feed">' + s.feed.map((e) =>
+          `<li><time>${fmtTime(e.time)}</time><b>${esc(e.agent)}</b> ${esc(e.action)}${e.details ? ' — ' + esc(e.details) : ''}${pointLink(e.id)}</li>`).join('') +
+          '</ul>' : '<div class="muted">Пока пусто</div>'}</div>`;
+      $app.querySelectorAll('[data-period]').forEach((b) => {
+        b.onclick = () => { ui.period = b.dataset.period; store.set('ui:period', ui.period); show(); };
+      });
+      $('allTasks').onclick = () => { ui.ttab = 'all'; ui.tstatus = 'open'; store.set('ui:ttab', 'all'); };
+    };
+
+    const show = () => {
+      const key = ui.period;
+      if (cache.stats[key]) render(cache.stats[key]); else $app.innerHTML = '<div class="spinner">Считаем статистику…</div>';
+      return api.stats(fromOf(key)).then((s) => { cache.stats[key] = s; if (ui.period === key) render(s); })
+        .catch((e) => { if (!cache.stats[key]) showError(e, statsView); else toast(e.server ? e.message : 'Нет связи', true); });
+    };
+    show();
+    currentLoad = show;
+    refreshTimer = setInterval(show, 60000);
   }
 
   function compress(file) {

@@ -1,7 +1,7 @@
 // Кэш оболочки приложения: сначала сеть (чтобы обновления приходили сразу), без сети — кэш.
-const CACHE = 'alina-2gis-v4';
+const CACHE = 'alina-sales-v5';
 const SHELL = ['./', 'index.html', 'styles.css', 'app.js', 'config.js', 'manifest.webmanifest',
-  'icons/apple-touch-icon.png', 'icons/icon-192.png'];
+  'icons/apple-touch-icon.png', 'icons/icon-192.png', 'icons/alina-logo.svg'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
