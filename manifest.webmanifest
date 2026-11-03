@@ -1,0 +1,14 @@
+{
+  "name": "Alina Group — Отработка базы 2ГИС",
+  "short_name": "Alina 2ГИС",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f4f2ef",
+  "theme_color": "#e8541e",
+  "lang": "ru",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}
