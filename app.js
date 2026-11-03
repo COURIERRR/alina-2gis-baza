@@ -21,7 +21,7 @@
     del(k) { try { localStorage.removeItem(k); } catch (e) {} },
   };
 
-  const me = { agent: store.get('agent', ''), code: store.get('code', '') };
+  const me = { agent: store.get('agent', '') };
   const ui = { q: '', sort: 'order', showTaken: false, showDone: false, pos: null };
   const cache = { summary: store.get('cache:summary', null), points: {} };
   let refreshTimer = null;
@@ -32,6 +32,12 @@
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const routeOf = (id) => Number(String(id).match(/^R(\d+)-/)[1]);
   const cleanAddr = (a) => String(a).replace(/\s*\d+\s*филиал\S*\s*$/i, '').trim();
+  const telDigits = (s) => String(s || '').replace(/[^\d+]/g, '');
+  function waUrl(s) {
+    let n = String(s || '').replace(/\D/g, '');
+    if (n.length === 11 && n[0] === '8') n = '7' + n.slice(1);
+    return n.length === 11 && n[0] === '7' && n.slice(1, 4) !== '800' ? 'https://wa.me/' + n : '';
+  }
 
   function toast(msg, isErr) {
     const t = $('toast');
@@ -53,7 +59,8 @@
   const hasCoords = (p) => p.lat != null && p.lon != null && p.acc !== 'нет';
   // Маршрут по координатам — только для точного адреса, иначе через поиск фирмы в 2ГИС
   const routable = (p) => hasCoords(p) && p.acc === 'точно';
-  const gisSearchUrl = (p) => 'https://2gis.kz/almaty/search/' + encodeURIComponent(p.name + ', ' + cleanAddr(p.address));
+  // Своя ссылка 2ГИС точки (если есть) открывает её карточку напрямую
+  const gisSearchUrl = (p) => p.gis || ('https://2gis.kz/almaty/search/' + encodeURIComponent(p.name + ', ' + cleanAddr(p.address)));
   const gisRouteWebUrl = (p) => routable(p)
     ? 'https://2gis.kz/almaty/directions/points/%7C' + p.lon + '%2C' + p.lat
     : gisSearchUrl(p);
@@ -76,12 +83,12 @@
       if (!data.ok) { const e = new Error(data.error || 'Ошибка сервера'); e.server = true; throw e; }
       return data;
     }
-    const get = (action, q) => fetch(url + '?' + new URLSearchParams(Object.assign({ action, code: me.code }, q)))
+    const get = (action, q) => fetch(url + '?' + new URLSearchParams(Object.assign({ action }, q)))
       .then(parse);
     const post = (action, body) => fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify(Object.assign({ action, code: me.code, agent: me.agent }, body)),
+      body: JSON.stringify(Object.assign({ action, agent: me.agent }, body)),
     }).then(parse);
     return {
       ping: () => get('ping'),
@@ -104,7 +111,7 @@
       const out = [];
       (await load()).routes.forEach((r) => r.points.forEach((p) => {
         const st = s[p.id] || {};
-        out.push(Object.assign({ route: r.route, lat: null, lon: null, acc: '' }, p,
+        out.push(Object.assign({ route: r.route, lat: null, lon: null, acc: p.lat != null ? 'точно' : '' }, p,
           { status: st.status || 'свободна', agent: st.agent || '' }));
       }));
       return out;
@@ -128,7 +135,8 @@
       summary: async () => {
         const by = {};
         (await all()).forEach((p) => {
-          const r = by[p.route] || (by[p.route] = { route: p.route, total: 0, free: 0, work: 0, done: 0 });
+          const r = by[p.route] || (by[p.route] = { route: p.route,
+            title: (base.routes.find((x) => x.route === p.route) || {}).title || '', total: 0, free: 0, work: 0, done: 0 });
           r.total++;
           if (p.status === 'выполнена') r.done++; else if (p.status === 'в работе') r.work++; else r.free++;
         });
@@ -237,25 +245,13 @@
         <form id="login">
           <div class="field"><label for="agent">Имя и фамилия</label>
             <input type="text" id="agent" autocomplete="name" required value="${esc(store.get('lastAgent', ''))}"></div>
-          ${MOCK ? '' : `<div class="field"><label for="code">Код доступа</label>
-            <input type="text" id="code" autocomplete="off" value="${esc(me.code)}"></div>`}
           <button class="btn primary" type="submit">Войти</button>
         </form>
       </div>`;
-    $('login').onsubmit = async (ev) => {
+    $('login').onsubmit = (ev) => {
       ev.preventDefault();
       const agent = $('agent').value.trim().replace(/\s+/g, ' ');
       if (!agent) return;
-      const btn = ev.target.querySelector('button');
-      btn.disabled = true;
-      if (!MOCK) {
-        me.code = $('code').value.trim();
-        try { await api.ping(); } catch (e) {
-          btn.disabled = false;
-          return toast(e.server ? e.message : 'Нет связи с таблицей', true);
-        }
-        store.set('code', me.code);
-      }
       me.agent = agent;
       store.set('agent', agent);
       store.set('lastAgent', agent);
@@ -272,6 +268,7 @@
         const pw = r.total ? (r.work / r.total) * 100 : 0;
         return `<a class="card route-card" href="#/r/${r.route}">
           <div class="row"><h2 class="grow">Маршрут ${r.route}</h2><span class="muted">${r.total} точек</span></div>
+          ${r.title ? `<div class="muted">${esc(r.title)}</div>` : ''}
           <div class="progress"><div class="done" style="width:${pd}%"></div><div class="work" style="width:${pw}%"></div></div>
           <div class="stats"><span>Выполнено <b>${r.done}</b></span><span>В работе <b>${r.work}</b></span><span>Свободно <b>${r.free}</b></span></div>
         </a>`;
@@ -420,12 +417,19 @@
       else if (other) status = `<div class="status-box other">Точку взял(а): ${esc(p.agent)}</div>`;
       else if (mine) status = '<div class="status-box work">У вас в работе</div>';
 
-      const d = (k) => esc(draft[k] || '');
+      // Телефоны точки (если есть в базе) подставляются в анкету по умолчанию
+      const known = { phone: p.phone || '', whatsapp: p.whatsapp || '' };
+      const d = (k) => esc(draft[k] != null ? draft[k] : (known[k] || ''));
+      const contacts = [
+        p.phone ? `<a href="tel:${esc(telDigits(p.phone))}">📞 ${esc(p.phone)}</a>` : '',
+        waUrl(p.whatsapp) ? `<a href="${waUrl(p.whatsapp)}" target="_blank" rel="noopener">💬 WhatsApp</a>` : '',
+      ].filter(Boolean).join(' &nbsp; ');
       $app.innerHTML = `
         <div class="card">
           <div class="muted">№ ${p.n} · ${esc(p.type)}</div>
           <h2>${esc(p.name)}</h2>
           <div>${esc(p.address)}</div>
+          ${contacts ? `<div style="margin-top:6px">${contacts}</div>` : ''}
           <div class="btns">
             <button class="btn primary wide" id="go">🚗 Маршрут в 2ГИС</button>
             <a class="btn ghost${routable(p) ? '' : ' wide'}" href="${gisSearchUrl(p)}" target="_blank" rel="noopener">Найти в 2ГИС</a>

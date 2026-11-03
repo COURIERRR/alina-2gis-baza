@@ -1,7 +1,7 @@
 /**
  * Alina Group — Отработка базы 2ГИС
  * Бэкенд для Google Таблицы. Вставьте этот файл в «Расширения → Apps Script».
- * Меню «Alina 2ГИС» в таблице: загрузка точек, геокодирование, код доступа.
+ * Меню «Alina 2ГИС» в таблице: загрузка точек и геокодирование.
  */
 
 const POINTS_SHEET = 'Точки';
@@ -12,9 +12,11 @@ const TZ = 'Asia/Almaty';
 const P = {
   id: 0, route: 1, n: 2, name: 3, type: 4, address: 5,
   lat: 6, lon: 7, acc: 8, status: 9, agent: 10, claimed: 11, done: 12,
+  phone: 13, whatsapp: 14, gis: 15,
 };
 const POINTS_HEADER = ['id', 'Маршрут', '№', 'Точка', 'Тип', 'Адрес',
-  'lat', 'lon', 'Точность', 'Статус', 'Агент', 'Взята', 'Выполнена'];
+  'lat', 'lon', 'Точность', 'Статус', 'Агент', 'Взята', 'Выполнена',
+  'Телефон', 'WhatsApp', 'Ссылка 2ГИС'];
 
 const ST_FREE = 'свободна';
 const ST_WORK = 'в работе';
@@ -38,7 +40,6 @@ function onOpen() {
   SpreadsheetApp.getUi().createMenu('Alina 2ГИС')
     .addItem('1. Загрузить точки из routes.json', 'menuImport')
     .addItem('2. Геокодировать адреса', 'geocodeAll')
-    .addItem('3. Задать код доступа', 'menuSetCode')
     .addSeparator()
     .addItem('Освободить точки «в работе» старше 24 ч', 'releaseStale')
     .addToUi();
@@ -58,28 +59,70 @@ function menuImport() {
   ui.alert('Готово: добавлено новых точек — ' + added + '.\nТеперь запустите «2. Геокодировать адреса».');
 }
 
-function menuSetCode() {
-  const ui = SpreadsheetApp.getUi();
-  const res = ui.prompt('Код доступа', 'Код, который агенты вводят в приложении:', ui.ButtonSet.OK_CANCEL);
-  if (res.getSelectedButton() !== ui.Button.OK) return;
-  PropertiesService.getScriptProperties().setProperty('ACCESS_CODE', res.getResponseText().trim());
-  ui.alert('Код сохранён');
+/** Повторная загрузка по сохранённой ссылке — можно запускать прямо из редактора. */
+function importSaved() {
+  const url = PropertiesService.getScriptProperties().getProperty('ROUTES_URL');
+  if (!url) throw new Error('Сначала запустите «1. Загрузить точки» из меню таблицы');
+  const added = importRoutes(url);
+  Logger.log('Добавлено новых точек: ' + added);
+  return added;
 }
 
 /* ---------------- Загрузка и геокодирование ---------------- */
 
-/** Добавляет точки, которых ещё нет в листе (статусы существующих не трогает). */
+/** Добавляет точки из routes.json, которых ещё нет в листе (статусы существующих не трогает). */
 function importRoutes(url) {
-  const data = JSON.parse(UrlFetchApp.fetch(url).getContentText('UTF-8'));
+  return addRoutes_(JSON.parse(UrlFetchApp.fetch(url).getContentText('UTF-8')).routes);
+}
+
+/**
+ * Импорт маршрута из Google Таблицы формата «Точки продаж на карте КЗ» (доступ по ссылке):
+ * №, Город, Название в 1С, Канал сбыта, Название точки, Адрес, Телефон, WhatsApp, Почта, Ссылка 2ГИС.
+ * Данные клиентов идут сразу в эту таблицу и не попадают в публичный репозиторий.
+ * coords — необязательно, { "№": [lon, lat] } из ссылок 2ГИС; точки без координат геокодируются.
+ */
+function importSalesSheet(spreadsheetId, sheetName, route, title, coords) {
+  const url = 'https://docs.google.com/spreadsheets/d/' + spreadsheetId +
+    '/gviz/tq?tqx=out:csv&sheet=' + encodeURIComponent(sheetName);
+  const clean = (s) => String(s || '').replace(/[​ ]/g, ' ')
+    .replace(/\s*[\r\n]+\s*/g, ', ').replace(/\s{2,}/g, ' ').replace(/^[\s,]+|[\s,]+$/g, '');
+  const rows = Utilities.parseCsv(UrlFetchApp.fetch(url).getContentText('UTF-8')).slice(1)
+    .filter(r => (String(r[4]) + String(r[5])).trim());
+  const points = rows.map(r => {
+    const n = Number(r[0]);
+    const c = (coords || {})[n];
+    const name1c = clean(r[2]).replace(/\*+/g, ' ').replace(/\s{2,}/g, ' ').trim();
+    return {
+      id: 'R' + route + '-' + ('00' + n).slice(-3), n, name: clean(r[4]),
+      type: [clean(r[3]), name1c].filter(Boolean).join(' · '), address: clean(r[5]),
+      phone: clean(r[6]), whatsapp: clean(r[7]), gis: clean(r[9]).replace(/\?.*$/, ''),
+      lon: c ? c[0] : null, lat: c ? c[1] : null,
+    };
+  });
+  return addRoutes_([{ route, title, points }]);
+}
+
+function addRoutes_(routes) {
   const sh = pointsSheet_();
   const existing = new Set(sh.getRange(1, 1, sh.getLastRow(), 1).getValues().map(r => String(r[0])));
   const rows = [];
-  data.routes.forEach(r => r.points.forEach(p => {
+  routes.forEach(r => r.points.forEach(p => {
     if (existing.has(p.id)) return;
-    rows.push([p.id, r.route, p.n, p.name, p.type, p.address, '', '', '', ST_FREE, '', '', '']);
+    // Координаты из ссылки 2ГИС считаются точными, без них — геокодирование
+    const has = p.lat != null && p.lon != null;
+    rows.push([p.id, r.route, p.n, p.name, p.type, p.address,
+      has ? p.lat : '', has ? p.lon : '', has ? 'точно' : '', ST_FREE, '', '', '',
+      p.phone || '', p.whatsapp || '', p.gis || '']);
   }));
-  if (rows.length) sh.getRange(sh.getLastRow() + 1, 1, rows.length, POINTS_HEADER.length).setValues(rows);
-  data.routes.forEach(r => resultSheet_(r.route));
+  if (rows.length) {
+    const range = sh.getRange(sh.getLastRow() + 1, 1, rows.length, POINTS_HEADER.length);
+    range.offset(0, P.phone, rows.length, 2).setNumberFormat('@');
+    range.setValues(rows);
+  }
+  const props = PropertiesService.getScriptProperties();
+  const titles = JSON.parse(props.getProperty('ROUTE_TITLES') || '{}');
+  routes.forEach(r => { if (r.title) titles[r.route] = r.title; resultSheet_(r.route); });
+  props.setProperty('ROUTE_TITLES', JSON.stringify(titles));
   return rows.length;
 }
 
@@ -159,7 +202,6 @@ function releaseStale() {
 function doGet(e) {
   return handle_(() => {
     const q = e.parameter || {};
-    checkCode_(q.code);
     if (q.action === 'summary') return summary_();
     if (q.action === 'points') return { points: points_(Number(q.route)) };
     if (q.action === 'ping') return { ok: true };
@@ -170,7 +212,6 @@ function doGet(e) {
 function doPost(e) {
   return handle_(() => {
     const body = JSON.parse(e.postData.contents);
-    checkCode_(body.code);
     const agent = String(body.agent || '').trim();
     if (!agent) throw new Error('Не указано имя агента');
     if (body.action === 'claim') return withLock_(() => claim_(body.id, agent));
@@ -185,11 +226,6 @@ function handle_(fn) {
   try { out = Object.assign({ ok: true }, fn()); }
   catch (err) { out = { ok: false, error: String(err && err.message || err) }; }
   return ContentService.createTextOutput(JSON.stringify(out)).setMimeType(ContentService.MimeType.JSON);
-}
-
-function checkCode_(code) {
-  const expected = PropertiesService.getScriptProperties().getProperty('ACCESS_CODE');
-  if (expected && String(code || '').trim() !== expected) throw new Error('Неверный код доступа');
 }
 
 function withLock_(fn) {
@@ -213,14 +249,16 @@ function toPoint_(row) {
     lon: row[P.lon] === '' ? null : Number(row[P.lon]),
     acc: String(row[P.acc] || ''),
     status: String(row[P.status] || ST_FREE), agent: String(row[P.agent] || ''),
+    phone: String(row[P.phone] || ''), whatsapp: String(row[P.whatsapp] || ''), gis: String(row[P.gis] || ''),
   };
 }
 
 function summary_() {
   const by = {};
+  const titles = JSON.parse(PropertiesService.getScriptProperties().getProperty('ROUTE_TITLES') || '{}');
   allPoints_().values.forEach(row => {
     const r = Number(row[P.route]);
-    by[r] = by[r] || { route: r, total: 0, free: 0, work: 0, done: 0 };
+    by[r] = by[r] || { route: r, title: titles[r] || '', total: 0, free: 0, work: 0, done: 0 };
     by[r].total++;
     const s = row[P.status] || ST_FREE;
     if (s === ST_DONE) by[r].done++; else if (s === ST_WORK) by[r].work++; else by[r].free++;
@@ -308,6 +346,8 @@ function pointsSheet_() {
     sh.setFrozenRows(1);
     sh.setColumnWidth(P.name + 1, 220);
     sh.setColumnWidth(P.address + 1, 360);
+  } else if (sh.getLastColumn() < POINTS_HEADER.length) {
+    sh.getRange(1, 1, 1, POINTS_HEADER.length).setValues([POINTS_HEADER]).setFontWeight('bold');
   }
   return sh;
 }
