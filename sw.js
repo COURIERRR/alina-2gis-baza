@@ -1,5 +1,5 @@
 // Кэш оболочки приложения: сначала сеть (чтобы обновления приходили сразу), без сети — кэш.
-const CACHE = 'alina-sales-v5';
+const CACHE = 'alina-sales-v6';
 const SHELL = ['./', 'index.html', 'styles.css', 'app.js', 'config.js', 'manifest.webmanifest',
   'icons/apple-touch-icon.png', 'icons/icon-192.png', 'icons/alina-logo.svg'];
 
