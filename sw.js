@@ -1,4 +1,4 @@
-﻿// РљСЌС€ РѕР±РѕР»РѕС‡РєРё РїСЂРёР»РѕР¶РµРЅРёСЏ: СЃРЅР°С‡Р°Р»Р° СЃРµС‚СЊ (С‡С‚РѕР±С‹ РѕР±РЅРѕРІР»РµРЅРёСЏ РїСЂРёС…РѕРґРёР»Рё СЃСЂР°Р·Сѓ), Р±РµР· СЃРµС‚Рё вЂ” РєСЌС€.
+﻿// Кэш оболочки приложения: сначала сеть (чтобы обновления приходили сразу), без сети — кэш.
 const CACHE = 'alina-sales-v9';
 const SHELL = ['./', 'index.html', 'styles.css', 'app.js', 'config.js', 'manifest.webmanifest',
   'icons/apple-touch-icon.png', 'icons/icon-192.png', 'icons/alina-logo.svg', 'icons/alina-logo-navy.svg'];
