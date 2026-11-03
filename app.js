@@ -43,7 +43,12 @@
     period: store.get('ui:period', 'today'), mperiod: store.get('ui:mperiod', 'day'), taskBack: null,
     auth: { step: me.agent ? 'pin' : 'name', name: me.agent || store.get('lastAgent', ''), pin1: '' },
   };
-  const cache = { summary: store.get('cache:summary', null), points: {}, tasks: store.get('cache:tasks', null), stats: {}, me: {} };
+  // Всё, что пришло с сервера, сохраняется на телефоне: экраны открываются сразу, свежие данные догружаются в фоне
+  const cache = {
+    summary: store.get('cache:summary', null), points: {}, tasks: store.get('cache:tasks', null),
+    stats: store.get('cache:stats', {}), me: store.get('cache:me', {}), staff: store.get('cache:staff', null),
+  };
+  const saveCache = (k) => store.set('cache:' + k, cache[k]);
   let refreshTimer = null;
   let currentLoad = null;
 
@@ -224,6 +229,7 @@
       dayStart: (geo) => post('dayStart', { geo }).then((d) => d.day),
       dayEnd: (geo) => post('dayEnd', { geo }).then((d) => d.day),
       me: (from, who) => post('me', { from, who }).then((d) => d.me),
+      boot: (from) => post('boot', { from }),
       staff: () => post('staff', {}).then((d) => d.staff),
       staffReset: (name) => post('staffReset', { name }).then((d) => d.staff),
       staffBlock: (name, blocked) => post('staffBlock', { name, blocked }).then((d) => d.staff),
@@ -484,6 +490,10 @@
           today: Object.assign({ visits: visits.filter((v) => v.agent === name && v.t >= dayStartMs()).length }, dayOf(name)),
           todo, feed: s.feed.filter((e) => e.agent === name).slice(0, 30) });
       },
+      boot: async (from) => ({
+        routes: await api.summary(), tasks: await api.tasks(), me: await api.me(from, ''),
+        stats: isManager() ? await api.stats(from) : null,
+      }),
       staff: () => wait(staffDb().map((s) => ({ name: s.name, role: s.role, status: s.status, hasPin: !!s.pin, created: s.created, last: s.last }))),
       staffReset: (name) => { const db = staffDb(); db.find((x) => x.name === name).pin = ''; store.set('mock:staff', db); return api.staff(); },
       staffBlock: (name, blocked) => { const db = staffDb(); db.find((x) => x.name === name).status = blocked ? 'заблокирован' : 'активен'; store.set('mock:staff', db); return api.staff(); },
@@ -805,6 +815,8 @@
     const f = store.get('faceid', null);
     if (f && f.agent !== s.name) store.del('faceid');
     unlocked = true;
+    prefetchedAt = 0;
+    prefetch();
     if (!faceIdOn() && faceIdOk && !store.get('faceid:skip:' + s.name, false)) return faceIdOffer();
     location.hash = '#/';
     route();
@@ -865,6 +877,7 @@
     store.set('lock:fails', 0);
     route();
     flushOutbox();
+    prefetch();
   }
 
   function lock() {
@@ -880,7 +893,10 @@
     unlocked = false;
     lockView.tried = false;
     ui.auth = { step: otherPerson ? 'name' : 'pin', name: otherPerson ? '' : me.agent, pin1: '' };
-    cache.me = {};
+    // Личные данные прошлого сотрудника не остаются на телефоне
+    cache.me = {}; cache.stats = {}; cache.staff = null;
+    ['me', 'stats', 'staff'].forEach((k) => store.del('cache:' + k));
+    prefetchedAt = 0;
     if (msg) toast(msg, true);
     location.hash = '#/';
     route();
@@ -921,6 +937,40 @@
       setBar('Смена PIN', '#/me');
     };
     show();
+  }
+
+  /* ---------- Загрузка данных: один запрос на старте, предзагрузка остального ---------- */
+  // Маршруты, задания, свой день (и «Сегодня» команды у руководителя) — одним запросом вместо трёх
+  function refreshAll() {
+    return api.boot(periodStart('day')).then((d) => {
+      d.routes.sort((a, b) => a.route - b.route);
+      cache.summary = d.routes; saveCache('summary');
+      cache.tasks = d.tasks; saveCache('tasks');
+      cache.me['|day'] = d.me; saveCache('me');
+      if (d.stats) { cache.stats.today = d.stats; saveCache('stats'); }
+      updateTabbar();
+      return d;
+    });
+  }
+
+  // После входа в фоне подтягиваются точки всех маршрутов, сотрудники и карта — переходы потом без ожидания
+  let prefetchedAt = 0;
+  function prefetch() {
+    if (Date.now() - prefetchedAt < 5 * 60000) return;
+    prefetchedAt = Date.now();
+    setTimeout(async () => {
+      try {
+        // Главная сама делает этот запрос — на других экранах делаем его здесь
+        if (location.hash.replace(/^#\/?/, '') !== '') await refreshAll();
+        else await new Promise((r) => setTimeout(r, 2500));
+        for (const r of cache.summary || []) {
+          if (!me.token) return;
+          await loadPoints(r.route);
+        }
+        if (isManager()) { cache.staff = await api.staff(); saveCache('staff'); }
+      } catch (e) { /* без связи — догрузится при следующем открытии */ }
+      loadLeaflet().catch(() => {});
+    }, 800);
   }
 
   /* ---------- Главная: задания, статистика, маршруты ---------- */
@@ -968,21 +1018,12 @@
         ev.target.disabled = true;
         ev.target.textContent = 'Определяем местоположение…';
         try { await api.dayStart(await getGeo()); toast('Рабочий день начат'); } catch (e) { toast(e.server ? e.message : 'Нет связи', true); }
-        cache.me = {};
-        loadMe('day', '').then(() => { if (isHome()) render(cache.summary); }).catch(() => {});
+        refreshAll().then(() => { if (isHome()) render(cache.summary); }).catch(() => {});
       };
     };
     render(cache.summary);
-    const load = () => {
-      api.summary().then((routes) => {
-        routes.sort((a, b) => a.route - b.route);
-        cache.summary = routes;
-        store.set('cache:summary', routes);
-        if (isHome()) render(routes);
-      }).catch((e) => { if (!cache.summary) showError(e, homeView); else toast('Нет связи', true); });
-      loadTasks().then(() => { if (isHome() && cache.summary) render(cache.summary); }).catch(() => {});
-      loadMe('day', '').then(() => { if (isHome() && cache.summary) render(cache.summary); }).catch(() => {});
-    };
+    const load = () => refreshAll().then(() => { if (isHome()) render(cache.summary); })
+      .catch((e) => { if (!cache.summary) showError(e, homeView); else toast('Нет связи', true); });
     load();
     currentLoad = load;
     refreshTimer = setInterval(load, 60000);
@@ -1128,7 +1169,7 @@
     let editing = null; // значения анкеты, когда автор её редактирует
     let revisit = null; // новый визит на выполненную точку: контакты из прошлой анкеты
     let history = null; // визиты точки, когда история открыта
-    let ptasks = null;
+    let ptasks = cache.tasks ? cache.tasks.filter((t) => t.point === id) : null; // сразу из сохранённых, потом обновятся
     renderPoint();
     // Актуальный статус с сервера
     loadPoints(routeNo).then((pts) => {
@@ -1711,7 +1752,7 @@
     const show = () => {
       const key = ui.period;
       if (cache.stats[key]) render(cache.stats[key]); else $app.innerHTML = '<div class="spinner">Считаем статистику…</div>';
-      return api.stats(fromOf(key)).then((s) => { cache.stats[key] = s; if (ui.period === key) render(s); })
+      return api.stats(fromOf(key)).then((s) => { cache.stats[key] = s; saveCache('stats'); if (ui.period === key) render(s); })
         .catch((e) => { if (!cache.stats[key]) showError(e, statsView); else toast(e.server ? e.message : 'Нет связи', true); });
     };
     show();
@@ -1728,7 +1769,7 @@
     return d.getTime();
   }
   function loadMe(period, who) {
-    return api.me(periodStart(period), who).then((m) => { cache.me[who + '|' + period] = m; return m; });
+    return api.me(periodStart(period), who).then((m) => { cache.me[who + '|' + period] = m; saveCache('me'); return m; });
   }
   const hm = (iso) => { const d = new Date(iso); return pad(d.getHours()) + ':' + pad(d.getMinutes()); };
   function duration(fromIso, toIso) {
@@ -1946,7 +1987,9 @@
       });
     };
     $app.innerHTML = '<div class="spinner">Загрузка…</div>';
-    api.staff().then(render).catch((e) => showError(e, staffView));
+    if (cache.staff) render(cache.staff);
+    api.staff().then((s) => { cache.staff = s; saveCache('staff'); render(s); })
+      .catch((e) => { if (!cache.staff) showError(e, staffView); else toast(e.server ? e.message : 'Нет связи', true); });
   }
 
   /* ---------- Карты (Leaflet + OpenStreetMap, подгружаются только здесь) ---------- */
