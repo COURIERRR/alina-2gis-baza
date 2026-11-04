@@ -261,6 +261,8 @@
       zonesBuild: () => post('zonesBuild', {}).then((d) => d.zones),
       zoneSet: (id, zone) => post('zoneSet', { id, zone }).then((d) => d.zones),
       zonesEnable: (on) => post('zonesEnable', { on }).then((d) => d.zones),
+      bannerLog: (rec) => post('bannerLog', { rec }),
+      banners: (from) => post('banners', { from }).then((d) => d.banners),
       staff: () => post('staff', {}).then((d) => d.staff),
       staffReset: (name) => post('staffReset', { name }).then((d) => d.staff),
       staffBlock: (name, blocked) => post('staffBlock', { name, blocked }).then((d) => d.staff),
@@ -563,6 +565,15 @@
         store.set('mock:zv', String(Date.now()));
         return wait(await zonesOut());
       },
+      bannerLog: async (rec) => {
+        const db = store.get('mock:banners', []);
+        if (db.some((x) => x.number === rec.number)) return wait({ ok: true, added: false });
+        db.push(Object.assign({}, rec, { agent: me.agent, time: new Date(rec.sentAt || Date.now()).toISOString() }));
+        store.set('mock:banners', db);
+        return wait({ ok: true, added: true });
+      },
+      banners: async (from) => wait(store.get('mock:banners', []).filter((x) => Date.parse(x.time) >= from)
+        .sort((a, b) => b.time.localeCompare(a.time))),
       stats: async (from) => {
         const s = computeStats(from, visitsAll(), tasksDb(), logDb());
         const pts = await all();
@@ -657,7 +668,27 @@
   const outbox = () => store.get('outbox', []);
   const isPending = (id) => outbox().some((x) => x.id === id);
 
+  // Копии заявок на баннеры для руководителя: без связи ждут в очереди, как анкеты
+  async function flushBanners() {
+    const items = store.get('bannerOutbox', []);
+    if (!items.length || flushBanners.busy || !me.token || !unlocked) return;
+    flushBanners.busy = true;
+    const rest = [];
+    for (const rec of items) {
+      try {
+        await api.bannerLog(rec);
+      } catch (e) {
+        if (!e.server) rest.push(rec);
+      }
+    }
+    // За время отправки могли добавиться новые
+    const added = store.get('bannerOutbox', []).filter((x) => !items.some((y) => y.number === x.number));
+    store.set('bannerOutbox', rest.concat(added));
+    flushBanners.busy = false;
+  }
+
   async function flushOutbox() {
+    flushBanners();
     const items = outbox();
     if (!items.length || flushOutbox.busy || !me.token || !unlocked) return;
     flushOutbox.busy = true;
@@ -699,6 +730,7 @@
     car: icon('<path d="M4 16.5V12l2-5.5h12L20 12v4.5"/><path d="M3 16.5h18v2H3zM4 12h16"/><circle cx="7.5" cy="14.3" r=".6"/><circle cx="16.5" cy="14.3" r=".6"/>'),
     phone: icon('<path d="M5.5 3.5h3.5l1.8 4.6-2.3 1.4a11 11 0 0 0 6 6l1.4-2.3 4.6 1.8v3.5a2 2 0 0 1-2.1 2A17 17 0 0 1 3.5 5.6a2 2 0 0 1 2-2.1z"/>'),
     chat: icon('<path d="M20.5 11.5a8.5 8.5 0 0 1-12.4 7.6L3.5 20.5l1.4-4.4a8.5 8.5 0 1 1 15.6-4.6z"/>'),
+    banner: icon('<rect x="3" y="5" width="18" height="11" rx="1.5"/><path d="M8 20l2-4M16 20l-2-4M7 9h10M7 12h6"/>'),
     plus: icon('<path d="M12 5v14M5 12h14"/>'),
     repeat: icon('<path d="M17 2.5 20.5 6 17 9.5"/><path d="M3.5 11V9.5A3.5 3.5 0 0 1 7 6h13.5M7 21.5 3.5 18 7 14.5"/><path d="M20.5 13v1.5A3.5 3.5 0 0 1 17 18H3.5"/>'),
     edit: icon('<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="m13.5 6.5 4 4"/>'),
@@ -757,12 +789,14 @@
   function updateTabbar() {
     const tb = $('tabbar');
     const authed = !!(me.token && unlocked);
-    tb.hidden = !authed;
-    document.body.classList.toggle('has-tabbar', authed);
-    if (!authed) return;
     const h = location.hash.replace(/^#\/?/, '');
+    // У мастера заявки свои кнопки внизу, поэтому на этом экране панели вкладок нет
+    const shown = authed && !/^zayavki/.test(h);
+    tb.hidden = !shown;
+    document.body.classList.toggle('has-tabbar', shown);
+    if (!shown) return;
     const cur = h === 'add' ? 'add' : /^(tasks|td\/)/.test(h) ? 'tasks'
-      : /^(stats|staff|teammap|report|rv\/|zones)/.test(h) || (/^me\/./.test(h) && isManager()) ? 'stats'
+      : /^(stats|staff|teammap|report|rv\/|zones|banners)/.test(h) || (/^me\/./.test(h) && isManager()) ? 'stats'
       : /^(me|pin)/.test(h) ? 'me' : 'home';
     const c = cache.tasks ? taskCounts(cache.tasks) : null;
     const tabs = [['home', '#/', 'Сегодня', I.home], ['tasks', '#/tasks', 'Задания', I.tasks]]
@@ -781,6 +815,7 @@
   function route() {
     stopRefresh();
     updateBanner();
+    hideZayavki();
     window.scrollTo(0, 0);
     if (!me.token || !unlocked) { stopTracking(); hideNearby(); }
     if (!me.token) return loginView();
@@ -804,6 +839,8 @@
     if (h === 'staff') return staffView();
     if (h === 'teammap') return teamMapView();
     if (h === 'zones') return zonesView();
+    if (h === 'banners') return bannersView();
+    if ((m = h.match(/^zayavki(?:\/(R\d+-\d+))?$/))) return zayavkiView(m[1]);
     return homeView();
   }
 
@@ -1056,6 +1093,8 @@
     unlocked = false;
     lockView.tried = false;
     ui.auth = { step: otherPerson ? 'name' : 'pin', name: otherPerson ? '' : me.agent, pin1: '' };
+    // Окно заявок знает имя сотрудника: следующий вход создаст его заново
+    if ($('zwrap')) $('zwrap').remove();
     // Личные данные прошлого сотрудника не остаются на телефоне
     cache.me = {}; cache.stats = {}; cache.staff = null;
     ['me', 'stats', 'staff'].forEach((k) => store.del('cache:' + k));
@@ -1138,6 +1177,7 @@
         if (isManager()) { cache.staff = await api.staff(); saveCache('staff'); }
       } catch (e) { /* без связи — догрузится при следующем открытии */ }
       loadLeaflet().catch(() => {});
+      ensureZframe();
     }, 800);
   }
 
@@ -1203,11 +1243,13 @@
     const dateLine = new Date().toLocaleDateString('ru-RU', { weekday: 'long', day: 'numeric', month: 'long' });
     const tasksRow = () => {
       const c = cache.tasks ? taskCounts(cache.tasks) : null;
-      if (!c) return '';
       return `<div class="list">
-        <a class="row-item has-icon" href="#/tasks"><span class="ri-icon">${I.tasks}</span>
+        ${c ? `<a class="row-item has-icon" href="#/tasks"><span class="ri-icon">${I.tasks}</span>
           <span class="grow"><span class="ri-title">Задания</span>
-            <span class="ri-sub" style="display:block">Свободных ${c.free} · мои ${c.mine}${c.overdue ? ` · <b style="color:var(--bad)">просрочено ${c.overdue}</b>` : ''}</span></span>${chev}</a>
+            <span class="ri-sub" style="display:block">Свободных ${c.free} · мои ${c.mine}${c.overdue ? ` · <b style="color:var(--bad)">просрочено ${c.overdue}</b>` : ''}</span></span>${chev}</a>` : ''}
+        <a class="row-item has-icon" href="#/zayavki"><span class="ri-icon" style="background:var(--accent-2)">${I.banner}</span>
+          <span class="grow"><span class="ri-title">Заявки на баннеры</span>
+            <span class="ri-sub" style="display:block">Дизайн и изготовление</span></span>${chev}</a>
       </div>`;
     };
     const render = (routes) => {
@@ -1672,12 +1714,14 @@
             : `<button class="btn primary" id="claim">${I.check} Беру в работу</button>`) : ''}
           ${ownDone && !editing && !revisit ? `<div class="btns">
             <a class="btn primary wide" href="#/give/${id}">${I.plus} Дать задание</a>
+            <a class="btn wide" href="#/zayavki/${id}">${I.banner} Заявка на баннер</a>
             <button class="btn wide" id="revisit">${I.repeat} Новый визит</button>
             <button class="btn ghost" id="edit">${I.edit} Изменить</button>
             <button class="btn danger" id="remove">${I.trash} Удалить</button></div>
             <button class="link-btn" id="hist">${history ? 'Скрыть историю' : 'История визитов (' + (p.visits || 1) + ')'}</button>
             <div id="histbox"></div>` : ''}
-          ${!done && !pending && !closed ? `<a class="btn" href="#/give/${id}" style="margin-top:8px">${I.plus} Дать задание</a>` : ''}
+          ${!done && !pending && !closed ? `<a class="btn" href="#/give/${id}" style="margin-top:8px">${I.plus} Дать задание</a>
+            <a class="btn" href="#/zayavki/${id}" style="margin-top:8px">${I.banner} Заявка на баннер</a>` : ''}
           ${canReopen ? `<button class="btn" id="reopen" style="margin-top:8px">${I.repeat} Вернуть в работу</button>` : ''}
           ${!closed && !pending && !editing && !revisit ? (closing ? `<div class="close-box">
               <div class="field"><span class="label">Почему точка не работает? <span class="req">*</span></span>${chips('closeReason', CLOSE_REASONS, 'radio', [])}</div>
@@ -2219,6 +2263,7 @@
           <a class="row-item has-icon" href="#/teammap"><span class="ri-icon" style="background:var(--ok)">${I.map}</span><span class="grow">Карта команды</span>${chev}</a>
           <a class="row-item has-icon" href="#/staff"><span class="ri-icon" style="background:#8e8e93">${I.users}</span><span class="grow">Сотрудники</span>${chev}</a>
           <a class="row-item has-icon" href="#/zones"><span class="ri-icon" style="background:var(--accent-2)">${I.pin}</span><span class="grow">Маршруты по районам</span>${chev}</a>
+          <a class="row-item has-icon" href="#/banners"><span class="ri-icon" style="background:#ff9500">${I.banner}</span><span class="grow">Заявки на баннеры</span>${chev}</a>
           <a class="row-item has-icon" href="#/tasks" id="allTasks"><span class="ri-icon">${I.tasks}</span><span class="grow">Все задания команды</span>${chev}</a>
         </div>
         <div class="section-title">За период</div>
@@ -2707,6 +2752,125 @@
 
   /* ---------- Маршруты по районам: черновик и включение (руководитель) ---------- */
   const ZONE_COLORS = ['#2a3b7e', '#ff9500', '#34c759', '#af52de', '#ff3b30', '#489ed7'];
+
+  /* ---------- Заявки на баннеры: встроенное приложение ---------- */
+  // Мост для копии приложения в zayavki/
+  window.AlinaBridge = {
+    mock: MOCK,
+    get agent() { return me.agent; },
+    onSent(rec) {
+      store.set('bannerOutbox', store.get('bannerOutbox', []).filter((x) => x.number !== rec.number).concat([rec]));
+      flushBanners();
+    },
+  };
+
+  // Окно одно на всё время работы: возврат мгновенный, недописанная заявка не теряется
+  function ensureZframe() {
+    let wrap = $('zwrap');
+    if (wrap) return wrap;
+    wrap = document.createElement('div');
+    wrap.id = 'zwrap';
+    wrap.className = 'zwrap';
+    wrap.hidden = true;
+    const f = document.createElement('iframe');
+    f.id = 'zframe';
+    f.title = 'Заявки на баннеры';
+    f.setAttribute('allow', 'microphone; camera; geolocation; web-share; clipboard-write');
+    f.src = 'zayavki/index.html';
+    wrap.appendChild(f);
+    document.body.appendChild(wrap);
+    return wrap;
+  }
+
+  function placeZframe() {
+    const wrap = $('zwrap');
+    if (!wrap || wrap.hidden) return;
+    const b = $('banner');
+    const bar = document.querySelector('.bar').getBoundingClientRect().bottom;
+    wrap.style.top = (b.hidden ? bar : b.getBoundingClientRect().bottom) + 'px';
+  }
+  window.addEventListener('resize', placeZframe);
+
+  function hideZayavki() {
+    const wrap = $('zwrap');
+    if (wrap) wrap.hidden = true;
+    document.body.classList.remove('in-frame');
+  }
+
+  async function zayavkiView(pointId) {
+    const hash = location.hash;
+    setBar('Заявки на баннеры', pointId ? '#/p/' + pointId : '#/');
+    hideNearby();
+    $app.innerHTML = '';
+    const wrap = ensureZframe();
+    wrap.hidden = false;
+    document.body.classList.add('in-frame');
+    placeZframe();
+    if (!pointId) {
+      const zw = $('zframe').contentWindow;
+      if (zw && zw.__zt) zw.__zt.fromHome();
+      return;
+    }
+    let p;
+    try { p = await loadPoint(pointId); } catch (e) { return toast(e.server ? e.message : 'Нет связи', true); }
+    if (location.hash !== hash) return;
+    const data = { id: p.id, name: p.name, address: cleanAddr(p.address), phone: p.phone || '', lat: p.lat, lon: p.lon };
+    const f = $('zframe');
+    const send = () => f.contentWindow.__zt.newForPoint(data);
+    if (f.contentWindow && f.contentWindow.__zt) send();
+    else f.addEventListener('load', send, { once: true });
+  }
+
+  /* ---------- Заявки на баннеры: список руководителя ---------- */
+  function bannersView() {
+    if (!isManager()) { location.hash = '#/'; return; }
+    setBar('Заявки на баннеры', '#/stats');
+    const hash = location.hash;
+    const periods = [['today', 'Сегодня'], ['7', '7 дней'], ['30', '30 дней'], ['all', 'Всё время']];
+    ui.bperiod = ui.bperiod || 'today';
+
+    const render = (list) => {
+      if (location.hash !== hash) return;
+      const people = Array.from(new Set(list.map((b) => b.agent))).sort();
+      if (people.indexOf(ui.bagent) < 0) ui.bagent = '';
+      const shown = list.filter((b) => !ui.bagent || b.agent === ui.bagent);
+      $app.innerHTML = `
+        <div class="seg tabs" style="margin-bottom:10px">${periods.map((p) =>
+          `<button data-bp="${p[0]}" class="${ui.bperiod === p[0] ? 'on' : ''}">${p[1]}</button>`).join('')}</div>
+        ${people.length > 1 ? `<div class="field"><select id="bAgent"><option value="">Все сотрудники</option>
+          ${people.map((n) => `<option${n === ui.bagent ? ' selected' : ''}>${esc(n)}</option>`).join('')}</select></div>` : ''}
+        <div class="section-title">Заявок: ${shown.length}</div>
+        ${shown.length ? shown.map((b) => `<div class="card">
+            <div class="row"><b class="grow">${esc(b.title || 'Заявка')}</b><span class="badge info">${esc(b.number)}</span></div>
+            <div class="muted">${esc(b.agent)} · ${fmtTime(b.time)}</div>
+            ${b.point ? `<div style="margin-top:6px">${/^R\d+-\d+$/.test(b.pointId) ? `<a href="#/p/${esc(b.pointId)}">${esc(b.point)} ›</a>` : esc(b.point)}</div>` : ''}
+            ${b.city || b.address ? `<div class="muted">${esc([b.city, b.address].filter(Boolean).join(' · '))}</div>` : ''}
+            <div class="muted">${esc([b.size, b.qty ? b.qty + ' шт.' : '', b.urgency, b.photos ? 'фото: ' + b.photos : '', b.folder ? 'папка: ' + b.folder : ''].filter(Boolean).join(' · '))}</div>
+            ${/^https?:/.test(b.fileUrl) ? `<a class="btn small" style="margin-top:8px" href="${esc(b.fileUrl)}" target="_blank" rel="noopener">Открыть файл заявки</a>` : ''}
+          </div>`).join('') : '<div class="empty">За этот период заявок нет</div>'}
+        <p class="muted" style="text-align:center;font-size:13px">Здесь заявки, отправленные из этого приложения. Заявки из старого значка — в его журнале и на почте отдела.</p>`;
+      $app.querySelectorAll('[data-bp]').forEach((x) => {
+        x.onclick = () => { ui.bperiod = x.dataset.bp; show(); };
+      });
+      if ($('bAgent')) $('bAgent').onchange = (ev) => { ui.bagent = ev.target.value; render(list); };
+    };
+    const show = () => {
+      const key = ui.bperiod;
+      cache.banners = cache.banners || {};
+      if (cache.banners[key]) render(cache.banners[key]); else $app.innerHTML = '<div class="spinner">Загрузка…</div>';
+      const from = key === 'all' ? 0 : (() => {
+        const d = new Date();
+        d.setHours(0, 0, 0, 0);
+        if (key !== 'today') d.setDate(d.getDate() - Number(key) + 1);
+        return d.getTime();
+      })();
+      return api.banners(from).then((list) => { cache.banners[key] = list; if (ui.bperiod === key) render(list); })
+        .catch((e) => { if (!cache.banners[key]) showError(e, bannersView); else toast(e.server ? e.message : 'Нет связи', true); });
+    };
+    show();
+    currentLoad = show;
+    refreshTimer = setInterval(show, 60000);
+  }
 
   async function zonesView() {
     if (!isManager()) { location.hash = '#/'; return; }
