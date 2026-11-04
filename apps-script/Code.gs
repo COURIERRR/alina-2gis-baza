@@ -22,11 +22,12 @@ const P = {
   lat: 6, lon: 7, acc: 8, status: 9, agent: 10, claimed: 11, done: 12,
   phone: 13, whatsapp: 14, gis: 15, visits: 16, last: 17, added: 18,
   closedReason: 19, closedNote: 20, closedBy: 21, closedAt: 22, closedGps: 23, addedAt: 24,
+  zone: 25, zoneN: 26,
 };
 const POINTS_HEADER = ['id', 'Маршрут', '№', 'Точка', 'Тип', 'Адрес',
   'lat', 'lon', 'Точность', 'Статус', 'Агент', 'Взята', 'Выполнена',
   'Телефон', 'WhatsApp', 'Ссылка 2ГИС', 'Визитов', 'Последний визит', 'Добавил',
-  'Причина закрытия', 'Комментарий к закрытию', 'Кто отметил', 'Когда отметили', 'GPS отметки', 'Добавлена'];
+  'Причина закрытия', 'Комментарий к закрытию', 'Кто отметил', 'Когда отметили', 'GPS отметки', 'Добавлена', 'Зона', '№ в зоне'];
 const NEW_POINTS_TITLE = 'Новые точки'; // маршрут для точек, которые агенты добавляют с места
 
 const ST_FREE = 'свободна';
@@ -133,6 +134,8 @@ function onOpen() {
     .addSeparator()
     .addItem('Освободить точки «в работе» старше 24 ч', 'releaseStale')
     .addItem('Код руководителя…', 'menuManagerCode')
+    .addSeparator()
+    .addItem('Рассчитать новые маршруты (черновик)', 'menuZonesBuild')
     .addItem('Адрес для ежедневного отчёта…', 'menuReportTo')
     .addToUi();
 }
@@ -158,6 +161,14 @@ function menuImport() {
   props.setProperty('ROUTES_URL', url);
   const added = importRoutes(url);
   ui.alert('Готово: добавлено новых точек — ' + added + '.\nТеперь запустите «2. Геокодировать адреса».');
+}
+
+/** Только черновик: заполняет колонки «Зона» и «№ в зоне», агенты продолжают видеть старые маршруты. */
+function menuZonesBuild() {
+  const z = zonesBuild_();
+  const lines = z.titles.map((title, i) => 'Маршрут ' + (i + 1) + ' (' + title + '): ' + z.points.filter(p => p.zone === i + 1).length);
+  SpreadsheetApp.getUi().alert('Черновик рассчитан. В приложении ничего не изменилось.\n\n' + lines.join('\n') +
+    '\nБез зоны: ' + z.points.filter(p => !p.zone).length);
 }
 
 /** Код входа руководителя хранится только здесь (Script Properties), не в репозитории. */
@@ -227,7 +238,7 @@ function addRoutes_(routes) {
     const has = p.lat != null && p.lon != null;
     rows.push([p.id, r.route, p.n, p.name, p.type, p.address,
       has ? p.lat : '', has ? p.lon : '', has ? 'точно' : '', ST_FREE, '', '', '',
-      p.phone || '', p.whatsapp || '', p.gis || '', '', '', '', '', '', '', '', '', '']);
+      p.phone || '', p.whatsapp || '', p.gis || '', '', '', '', '', '', '', '', '', '', '', '']);
   }));
   if (rows.length) {
     const range = sh.getRange(sh.getLastRow() + 1, 1, rows.length, POINTS_HEADER.length);
@@ -322,6 +333,7 @@ function doGet(e) {
     auth_(q.token);
     if (q.action === 'summary') return cached_('summary', 600, summary_);
     if (q.action === 'points') return { points: cached_('points:' + Number(q.route), 600, () => points_(Number(q.route))) };
+    if (q.action === 'point') return { point: toPoint_(findRow_(q.id).row) };
     if (q.action === 'result') return { result: result_(q.id) };
     if (q.action === 'history') return { visits: cached_('hist:' + q.id, 600, () => history_(q.id)) };
     if (q.action === 'tasks') return { tasks: allTasksCached_().filter(t => !q.point || t.point === String(q.point)) };
@@ -364,6 +376,10 @@ function doPost(e) {
       case 'boot': return boot_(me, Number(body.from) || 0);
       case 'stats': requireManager_(me); return { stats: statsCached_(Number(body.from) || 0) };
       case 'staff': requireManager_(me); return { staff: cached_('staff', 600, staff_) };
+      case 'zones': requireManager_(me); return { zones: zonesPreview_() };
+      case 'zonesBuild': requireManager_(me); return { zones: zonesBuild_() };
+      case 'zoneSet': requireManager_(me); return { zones: withLock_(() => zoneSet_(me.name, body.id, body.zone)) };
+      case 'zonesEnable': requireManager_(me); return { zones: withLock_(() => zonesEnable_(me.name, !!body.on)) };
       case 'staffReset': requireManager_(me); return withLock_(() => staffSet_(me, body.name, 'reset'));
       case 'staffBlock': requireManager_(me); return withLock_(() => staffSet_(me, body.name, body.blocked ? 'block' : 'unblock'));
       case 'staffRole': requireManager_(me); return withLock_(() => staffSet_(me, body.name, body.role === ROLE_MANAGER ? 'manager' : 'agent'));
@@ -393,6 +409,7 @@ function boot_(me, from) {
     tasks: allTasksCached_(),
     me: meCached_(me, from, ''),
     stats: me.role === ROLE_MANAGER ? statsCached_(from) : null,
+    zv: PropertiesService.getScriptProperties().getProperty('ZONES_VER') || '',
   };
 }
 
@@ -456,7 +473,9 @@ const visitsOf_ = (row) => Number(row[P.visits]) || (row[P.status] === ST_DONE |
 
 function toPoint_(row) {
   return {
-    id: String(row[P.id]), route: Number(row[P.route]), n: Number(row[P.n]),
+    // Маршрут и № для показа: при включённых зонах — из зоны. id и старый маршрут (origin) не меняются
+    id: String(row[P.id]), route: effRoute_(row), origin: Number(row[P.route]),
+    n: zonesOn_() && Number(row[P.zoneN]) ? Number(row[P.zoneN]) : Number(row[P.n]),
     name: String(row[P.name]), type: String(row[P.type]), address: String(row[P.address]),
     lat: row[P.lat] === '' ? null : Number(row[P.lat]),
     lon: row[P.lon] === '' ? null : Number(row[P.lon]),
@@ -540,7 +559,12 @@ function pointAdd_(agent, f) {
   const id = 'R' + route + '-' + String(n).padStart(3, '0');
   const row = [id, route, n, name, String(f.type || '').trim(), address,
     has ? lat : '', has ? lon : '', has ? 'точно' : '', ST_FREE, '', '', '',
-    String(f.phone || '').trim(), '', '', '', '', agent, '', '', '', '', '', new Date()];
+    String(f.phone || '').trim(), '', '', '', '', agent, '', '', '', '', '', new Date(), '', ''];
+  // При включённых зонах новая точка сразу попадает в ближайший район — маршрутов остаётся 6
+  if (zonesOn_() && has) {
+    const z = nearestZone_(lat, lon);
+    if (z) { row[P.zone] = z; row[P.zoneN] = values.reduce((m, r) => Number(r[P.zone]) === z ? Math.max(m, Number(r[P.zoneN]) || 0) : m, 0) + 1; }
+  }
   const range = sh.getRange(sh.getLastRow() + 1, 1, 1, POINTS_HEADER.length);
   range.offset(0, P.phone, 1, 2).setNumberFormat('@');
   range.setValues([row]);
@@ -584,9 +608,11 @@ function positions_() {
 
 function summary_() {
   const by = {};
-  const titles = JSON.parse(PropertiesService.getScriptProperties().getProperty('ROUTE_TITLES') || '{}');
+  const props = PropertiesService.getScriptProperties();
+  const titles = Object.assign(JSON.parse(props.getProperty('ROUTE_TITLES') || '{}'),
+    zonesOn_() ? JSON.parse(props.getProperty('ZONE_TITLES') || '{}') : {});
   allPoints_().values.forEach(row => {
-    const r = Number(row[P.route]);
+    const r = effRoute_(row);
     by[r] = by[r] || { route: r, title: titles[r] || '', total: 0, free: 0, work: 0, done: 0, closed: 0 };
     by[r].total++;
     const s = row[P.status] || ST_FREE;
@@ -596,7 +622,8 @@ function summary_() {
 }
 
 function points_(route) {
-  return allPoints_().values.filter(row => Number(row[P.route]) === route).map(toPoint_);
+  const list = allPoints_().values.filter(row => effRoute_(row) === route).map(toPoint_);
+  return zonesOn_() ? list.sort((a, b) => a.n - b.n) : list;
 }
 
 function findRow_(id) {
@@ -1337,6 +1364,9 @@ function dayReport_(date) {
   const from = Utilities.parseDate(date + ' 00:00', TZ, 'yyyy-MM-dd HH:mm').getTime();
   const to = from + 86400000;
   const inDay = (t) => t >= from && t < to;
+  // В отчёте — маршрут и № точки, какие сейчас видят агенты
+  const shownById = {};
+  allPoints_().values.forEach(r => { const s = toPoint_(r); shownById[s.id] = s; });
   const by = {};
   const ag = (name) => {
     const k = nameKey_(name);
@@ -1369,7 +1399,7 @@ function dayReport_(date) {
     a.first = a.first || hmIn_(v.t);
     a.last = hmIn_(v.t);
     a.items.push({
-      id: v.id, route: Number(String(v.id).replace(/^R(\d+)-.*$/, '$1')) || '', n: v.n, name: v.name, type: v.type, address: v.address,
+      id: v.id, route: (shownById[v.id] || {}).route || '', n: (shownById[v.id] || v).n, name: v.name, type: v.type, address: v.address,
       time: hmIn_(v.t), t: v.t, visit: Number(v.visit) || 1, gps: v.gps, distance: v.distance === '' ? null : Number(v.distance), far: !!far,
       from: prev ? prev.name : (a.start ? 'Начало дня' : ''),
       fromMin: fromT && v.t >= fromT ? Math.round((v.t - fromT) / 60000) : null,
@@ -1385,13 +1415,13 @@ function dayReport_(date) {
   allPoints_().values.forEach(row => {
     const ct = parseTime_(row[P.closedAt]);
     if (ct && inDay(ct)) {
-      closed.push({ id: String(row[P.id]), route: Number(row[P.route]), n: row[P.n], name: String(row[P.name]), address: String(row[P.address]),
+      closed.push({ id: String(row[P.id]), route: effRoute_(row), n: toPoint_(row).n, name: String(row[P.name]), address: String(row[P.address]),
         reason: String(row[P.closedReason]), note: String(row[P.closedNote]), by: String(row[P.closedBy]), time: hmIn_(ct), gps: String(row[P.closedGps] || ''), t: ct });
       ag(row[P.closedBy]).closed++;
     }
     const at = parseTime_(row[P.addedAt]);
     if (at && inDay(at)) {
-      added.push({ id: String(row[P.id]), route: Number(row[P.route]), name: String(row[P.name]), type: String(row[P.type]), address: String(row[P.address]),
+      added.push({ id: String(row[P.id]), route: effRoute_(row), name: String(row[P.name]), type: String(row[P.type]), address: String(row[P.address]),
         phone: String(row[P.phone] || ''), by: String(row[P.added] || ''), time: hmIn_(at), t: at, status: String(row[P.status] || ST_FREE) });
       if (row[P.added]) ag(row[P.added]).added++;
     }
@@ -1605,6 +1635,217 @@ function reportSetup() {
   Logger.log('Триггер создан: ' + ScriptApp.getProjectTriggers().filter(t => t.getHandlerFunction() === 'sendDailyReport').length);
 }
 
+/* ---------------- Маршруты по зонам ----------------
+ * Новые маршруты — отдельный слой поверх данных: заполняются только колонки «Зона» и «№ в зоне».
+ * id, старый маршрут, статусы, анкеты (листы «Маршрут N»), фото и задания не меняются,
+ * поэтому переход можно включить и отменить переключателем ZONES_ON. */
+const ZONES = 6;
+const ZONE_SLACK = 1.12; // зона может быть больше средней не более чем на 12%
+const ALMATY_CENTER = { lat: 43.238, lon: 76.889 };
+
+let zonesOnMemo_ = null;
+function zonesOn_() {
+  if (zonesOnMemo_ === null) zonesOnMemo_ = PropertiesService.getScriptProperties().getProperty('ZONES_ON') === '1';
+  return zonesOnMemo_;
+}
+// Точка без зоны остаётся в своём старом маршруте — при включении ничего не пропадёт
+const effRoute_ = (row) => zonesOn_() && Number(row[P.zone]) ? Number(row[P.zone]) : Number(row[P.route]);
+
+const zoneXY_ = (p) => ({ x: p.lon * 81.1, y: p.lat * 111 }); // км; для широты Алматы
+const dist2_ = (a, b) => (a.x - b.x) ** 2 + (a.y - b.y) ** 2;
+
+/** Разбивка на k компактных зон примерно равного размера (k-means с лимитом вместимости, расчёт повторяемый). */
+function balancedZones_(C, k, slack) {
+  const cap = Math.ceil(C.length / k * slack);
+  let seed = 7;
+  const rnd = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647; };
+  let best = null;
+  for (let t = 0; t < 12; t++) {
+    const cen = [Object.assign({}, C[Math.floor(rnd() * C.length)])];
+    while (cen.length < k) {
+      const ds = C.map(p => Math.min.apply(null, cen.map(c => dist2_(c, p))));
+      let r = rnd() * ds.reduce((a, b) => a + b, 0), i = 0;
+      while ((r -= ds[i]) > 0 && i < C.length - 1) i++;
+      cen.push(Object.assign({}, C[i]));
+    }
+    let asg = [];
+    for (let it = 0; it < 20; it++) {
+      const cnt = new Array(k).fill(0);
+      asg = new Array(C.length).fill(-1);
+      const order = C.map((p, i) => {
+        const ds = cen.map(c => dist2_(c, p)).sort((a, b) => a - b);
+        return { i, regret: Math.sqrt(ds[1]) - Math.sqrt(ds[0]) };
+      }).sort((a, b) => b.regret - a.regret);
+      order.forEach(o => {
+        const opts = cen.map((c, z) => ({ z, d: dist2_(c, C[o.i]) })).sort((a, b) => a.d - b.d);
+        const f = opts.find(x => cnt[x.z] < cap);
+        asg[o.i] = f.z;
+        cnt[f.z]++;
+      });
+      cen.forEach((c, z) => {
+        const m = C.filter((_, j) => asg[j] === z);
+        if (m.length) { c.x = m.reduce((s, p) => s + p.x, 0) / m.length; c.y = m.reduce((s, p) => s + p.y, 0) / m.length; }
+      });
+    }
+    const cost = C.reduce((s, p, i) => s + Math.sqrt(dist2_(cen[asg[i]], p)), 0);
+    if (!best || cost < best.cost) best = { cost, asg: asg.slice(), cen: cen.map(c => ({ x: c.x, y: c.y })) };
+  }
+  return best;
+}
+
+/** Улица или микрорайон из адреса: по ним проверяются точки с неточными координатами. */
+function streetKey_(address) {
+  const part = String(address).toLowerCase().replace(/ё/g, 'е').split(',').map(s => s.trim())
+    .find(s => /(улица|проспект|микрорайон|мкр|переулок|бульвар|шоссе|тракт)/.test(s));
+  return part ? part.replace(/(^|\s)(улица|проспект|микрорайон|мкр\.?|переулок|бульвар|шоссе|тракт)(?=\s|$)/g, ' ').trim() : '';
+}
+
+/** Название зоны: настоящие районы по обратному геокодированию выборки точных адресов. */
+function zoneTitle_(pts, fallback) {
+  const exact = pts.filter(p => p.acc === 'точно' && p.lat != null);
+  const counts = {};
+  let n = 0;
+  try {
+    const geocoder = Maps.newGeocoder().setLanguage('ru');
+    const step = Math.max(1, Math.floor(exact.length / 12));
+    for (let i = 0; i < exact.length; i += step) {
+      const res = geocoder.reverseGeocode(exact[i].lat, exact[i].lon);
+      const comps = (res.results || []).reduce((a, r) => a.concat(r.address_components || []), []);
+      const area = comps.find(c => /район/i.test(c.long_name)) || comps.find(c => (c.types || []).indexOf('locality') >= 0);
+      if (area) {
+        const name = String(area.long_name).replace(/\s*район\s*/i, '').trim();
+        counts[name] = (counts[name] || 0) + 1;
+        n++;
+      }
+    }
+  } catch (e) { return fallback; }
+  const top = Object.keys(counts).sort((a, b) => counts[b] - counts[a]).filter(k => counts[k] / n >= 0.25).slice(0, 2);
+  return top.length ? top.join(', ') : fallback;
+}
+
+/** Черновик зон. Пишет только колонки «Зона» и «№ в зоне»; агенты не увидят его, пока зоны не включены. */
+function zonesBuild_() {
+  if (zonesOn_()) fail_('Новые маршруты уже включены — сначала верните старые');
+  const { sh, values } = allPoints_();
+  const pts = values.map((row, i) => {
+    const has = row[P.lat] !== '' && row[P.lon] !== '';
+    const p = { i, acc: String(row[P.acc] || ''), key: streetKey_(row[P.address]), zone: 0,
+      lat: has ? Number(row[P.lat]) : null, lon: has ? Number(row[P.lon]) : null };
+    return has ? Object.assign(p, zoneXY_(p)) : p;
+  });
+  const C = pts.filter(p => p.lat != null);
+  const res = balancedZones_(C, ZONES, ZONE_SLACK);
+  C.forEach((p, j) => { p.zone = res.asg[j] + 1; });
+
+  // Неточные и пустые координаты: если на этой улице точные адреса почти все в одной зоне — берём её
+  const byStreet = {};
+  pts.filter(p => p.acc === 'точно' && p.key && p.zone).forEach(p => {
+    const s = byStreet[p.key] || (byStreet[p.key] = {});
+    s[p.zone] = (s[p.zone] || 0) + 1;
+  });
+  pts.filter(p => p.acc !== 'точно' && byStreet[p.key]).forEach(p => {
+    const s = byStreet[p.key];
+    const total = Object.keys(s).reduce((a, z) => a + s[z], 0);
+    const top = Object.keys(s).sort((a, b) => s[b] - s[a])[0];
+    if (total >= 2 && s[top] / total >= 0.7) p.zone = Number(top);
+  });
+
+  // Номера зон — по часовой стрелке от севера вокруг центра города
+  const center = zoneXY_(ALMATY_CENTER);
+  const angle = (c) => (Math.atan2(c.x - center.x, c.y - center.y) + 2 * Math.PI) % (2 * Math.PI);
+  const order = res.cen.map((c, z) => ({ z: z + 1, a: angle(c) })).sort((a, b) => a.a - b.a);
+  const renum = {};
+  order.forEach((o, i) => { renum[o.z] = i + 1; });
+  pts.forEach(p => { if (p.zone) p.zone = renum[p.zone]; });
+
+  // № в зоне — порядок объезда: каждый раз к ближайшей следующей точке
+  const DIRS = ['север', 'северо-восток', 'восток', 'юго-восток', 'юг', 'юго-запад', 'запад', 'северо-запад'];
+  const titles = {};
+  for (let z = 1; z <= ZONES; z++) {
+    const inZone = pts.filter(p => p.zone === z);
+    const left = inZone.filter(p => p.lat != null);
+    let cur = center, n = 0;
+    while (left.length) {
+      let b = 0;
+      left.forEach((p, i) => { if (dist2_(cur, p) < dist2_(cur, left[b])) b = i; });
+      cur = left.splice(b, 1)[0];
+      cur.n = ++n;
+    }
+    inZone.filter(p => p.lat == null).forEach(p => { p.n = ++n; });
+    const o = order[z - 1];
+    titles[z] = zoneTitle_(inZone, DIRS[Math.round(o.a / (Math.PI / 4)) % 8]);
+  }
+
+  withLock_(() => {
+    sh.getRange(2, P.zone + 1, pts.length, 2).setValues(pts.map(p => [p.zone || '', p.zone ? p.n : '']));
+    const props = PropertiesService.getScriptProperties();
+    props.setProperty('ZONE_TITLES', JSON.stringify(titles));
+    props.setProperty('ZONE_CENTERS', JSON.stringify(order.map(o => ({ lat: res.cen[o.z - 1].y / 111, lon: res.cen[o.z - 1].x / 81.1 }))));
+    log_('Система', 'рассчитан черновик новых маршрутов', '', '');
+  });
+  return zonesPreview_();
+}
+
+/** Для экрана руководителя: карта и счётчики черновика. */
+function zonesPreview_() {
+  const props = PropertiesService.getScriptProperties();
+  const stored = JSON.parse(props.getProperty('ZONE_TITLES') || '{}');
+  const titles = [];
+  for (let z = 1; z <= ZONES; z++) titles.push(stored[z] || '');
+  const rows = allPoints_().values;
+  return {
+    on: zonesOn_(), built: rows.some(row => Number(row[P.zone]) > 0), titles,
+    points: rows.map(row => ({
+      id: String(row[P.id]), name: String(row[P.name]), address: String(row[P.address]),
+      lat: row[P.lat] === '' ? null : Number(row[P.lat]), lon: row[P.lon] === '' ? null : Number(row[P.lon]),
+      zone: Number(row[P.zone]) || 0, origin: Number(row[P.route]), acc: String(row[P.acc] || ''),
+      done: row[P.status] === ST_DONE, closed: row[P.status] === ST_CLOSED,
+    })),
+  };
+}
+
+/** Ближайшая зона для точки, добавленной после расчёта. */
+function nearestZone_(lat, lon) {
+  const centers = JSON.parse(PropertiesService.getScriptProperties().getProperty('ZONE_CENTERS') || '[]');
+  const me = zoneXY_({ lat, lon });
+  let best = 0, bd = Infinity;
+  centers.forEach((c, i) => { const d = dist2_(zoneXY_(c), me); if (d < bd) { bd = d; best = i + 1; } });
+  return best;
+}
+
+function zoneSet_(agent, id, zone) {
+  const z = Number(zone);
+  if (!(z >= 1 && z <= ZONES)) fail_('Маршрут — от 1 до ' + ZONES);
+  const { sh, rowIndex, row } = findRow_(id);
+  const max = allPoints_().values.reduce((m, r) => Number(r[P.zone]) === z ? Math.max(m, Number(r[P.zoneN]) || 0) : m, 0);
+  sh.getRange(rowIndex, P.zone + 1, 1, 2).setValues([[z, max + 1]]);
+  log_(agent, 'назначил точке маршрут', id, row[P.name] + ' → ' + z);
+  return zonesPreview_();
+}
+
+function zonesEnable_(agent, on) {
+  const rows = allPoints_().values;
+  if (on && !rows.some(row => Number(row[P.zone]) > 0)) fail_('Сначала рассчитайте черновик');
+  if (on) {
+    // Точки, добавленные с места после расчёта, — в ближайшую зону
+    const sh = pointsSheet_();
+    rows.forEach((row, i) => {
+      if (Number(row[P.zone]) || row[P.lat] === '' || row[P.lon] === '') return;
+      const z = nearestZone_(Number(row[P.lat]), Number(row[P.lon]));
+      if (!z) return;
+      const n = rows.reduce((m, r) => Number(r[P.zone]) === z ? Math.max(m, Number(r[P.zoneN]) || 0) : m, 0) + 1;
+      row[P.zone] = z; row[P.zoneN] = n;
+      sh.getRange(i + 2, P.zone + 1, 1, 2).setValues([[z, n]]);
+    });
+  }
+  const props = PropertiesService.getScriptProperties();
+  props.setProperty('ZONES_ON', on ? '1' : '0');
+  props.setProperty('ZONES_VER', Utilities.getUuid().slice(0, 8)); // телефоны сбросят сохранённые списки точек
+  zonesOnMemo_ = on;
+  log_(agent, on ? 'включил новые маршруты' : 'вернул старые маршруты', '', '');
+  return zonesPreview_();
+}
+
 /* ---------------- Листы и папки ---------------- */
 
 function pointsSheet_() {
@@ -1612,6 +1853,7 @@ function pointsSheet_() {
   let sh = ss.getSheetByName(POINTS_SHEET);
   if (!sh) {
     sh = ss.insertSheet(POINTS_SHEET, 0);
+    if (sh.getMaxColumns() < POINTS_HEADER.length) sh.insertColumnsAfter(sh.getMaxColumns(), POINTS_HEADER.length - sh.getMaxColumns());
     sh.getRange(1, 1, 1, POINTS_HEADER.length).setValues([POINTS_HEADER]).setFontWeight('bold');
     sh.setFrozenRows(1);
     sh.setColumnWidth(P.name + 1, 220);
