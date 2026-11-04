@@ -137,6 +137,7 @@ function onOpen() {
     .addSeparator()
     .addItem('Рассчитать новые маршруты (черновик)', 'menuZonesBuild')
     .addItem('Назначить маршруты точкам…', 'menuZonesAssign')
+    .addItem('Навести порядок в зонах', 'menuZonesTidy')
     .addItem('Включить новые маршруты', 'menuZonesOn')
     .addItem('Вернуть старые маршруты', 'menuZonesOff')
     .addItem('Адрес для ежедневного отчёта…', 'menuReportTo')
@@ -181,6 +182,13 @@ function menuZonesAssign() {
   if (res.getSelectedButton() !== ui.Button.OK) return;
   const n = withLock_(() => zonesAssign_('Таблица', res.getResponseText()));
   ui.alert('Назначено точек: ' + n + '. Без маршрута осталось: ' + zonesPreview_().points.filter(p => !p.zone).length);
+}
+
+/** Точки, окружённые соседями другого маршрута, переходят к этим соседям. */
+function menuZonesTidy() {
+  const ui = SpreadsheetApp.getUi();
+  const r = withLock_(() => zonesTidy_('Таблица'));
+  ui.alert('Перешло точек: ' + r.moved + '\n\n' + r.sizes.map((n, i) => 'Маршрут ' + (i + 1) + ': ' + n).join('\n'));
 }
 
 function menuZonesOn() { menuZonesSwitch_(true); }
@@ -1781,28 +1789,18 @@ function zonesBuild_() {
   order.forEach((o, i) => { renum[o.z] = i + 1; });
   pts.forEach(p => { if (p.zone) p.zone = renum[p.zone]; });
 
-  // № в зоне — порядок объезда: каждый раз к ближайшей следующей точке
+  numberZones_(pts);
   const DIRS = ['север', 'северо-восток', 'восток', 'юго-восток', 'юг', 'юго-запад', 'запад', 'северо-запад'];
   const titles = {};
   for (let z = 1; z <= ZONES; z++) {
-    const inZone = pts.filter(p => p.zone === z);
-    const left = inZone.filter(p => p.lat != null);
-    let cur = center, n = 0;
-    while (left.length) {
-      let b = 0;
-      left.forEach((p, i) => { if (dist2_(cur, p) < dist2_(cur, left[b])) b = i; });
-      cur = left.splice(b, 1)[0];
-      cur.n = ++n;
-    }
-    inZone.filter(p => p.lat == null).forEach(p => { p.n = ++n; });
-    const o = order[z - 1];
-    titles[z] = zoneTitle_(inZone, DIRS[Math.round(o.a / (Math.PI / 4)) % 8]);
+    titles[z] = zoneTitle_(pts.filter(p => p.zone === z), DIRS[Math.round(order[z - 1].a / (Math.PI / 4)) % 8]);
   }
 
   withLock_(() => {
     sh.getRange(2, P.zone + 1, pts.length, 2).setValues(pts.map(p => [p.zone || '', p.zone ? p.n : '']));
     const props = PropertiesService.getScriptProperties();
     props.setProperty('ZONE_TITLES', JSON.stringify(titles));
+    props.deleteProperty('ZONE_PINNED');
     props.setProperty('ZONE_CENTERS', JSON.stringify(order.map(o => ({ lat: res.cen[o.z - 1].y / 111, lon: res.cen[o.z - 1].x / 81.1 }))));
     log_('Система', 'рассчитан черновик новых маршрутов', '', '');
   });
@@ -1836,6 +1834,68 @@ function nearestZone_(lat, lon) {
   return best;
 }
 
+/** № в зоне — порядок объезда: от центра города каждый раз к ближайшей следующей точке, точки без координат в конце. */
+function numberZones_(pts) {
+  const center = zoneXY_(ALMATY_CENTER);
+  for (let z = 1; z <= ZONES; z++) {
+    const inZone = pts.filter(p => p.zone === z);
+    const left = inZone.filter(p => p.lat != null);
+    let cur = center, n = 0;
+    while (left.length) {
+      let b = 0;
+      left.forEach((p, i) => { if (dist2_(cur, p) < dist2_(cur, left[b])) b = i; });
+      cur = left.splice(b, 1)[0];
+      cur.n = ++n;
+    }
+    inZone.filter(p => p.lat == null).forEach(p => { p.n = ++n; });
+  }
+}
+
+/**
+ * Наведение порядка: точка переходит к маршруту, которого среди соседей больше (12 ближайших в радиусе 3 км).
+ * Одинокая точка смотрит на 3 ближайшие в радиусе 8 км и переходит, только если все они из одного маршрута.
+ * Назначенные вручную точки не двигаются. Пишутся только колонки «Зона» и «№ в зоне».
+ */
+function zonesTidy_(agent) {
+  const props = PropertiesService.getScriptProperties();
+  const pinned = JSON.parse(props.getProperty('ZONE_PINNED') || '[]');
+  const { sh, values } = allPoints_();
+  const pts = values.map((row, i) => {
+    const has = row[P.lat] !== '' && row[P.lon] !== '';
+    const p = { i, id: String(row[P.id]), zone: Number(row[P.zone]) || 0, was: Number(row[P.zone]) || 0,
+      lat: has ? Number(row[P.lat]) : null, lon: has ? Number(row[P.lon]) : null };
+    return has ? Object.assign(p, zoneXY_(p)) : p;
+  });
+  const C = pts.filter(p => p.lat != null && p.zone);
+  const near = C.map(a => C.filter(b => b !== a).map(b => ({ b, d: Math.sqrt(dist2_(a, b)) })).sort((x, y) => x.d - y.d));
+  for (let round = 0; round < 10; round++) {
+    let changed = 0;
+    C.forEach((a, j) => {
+      if (pinned.indexOf(a.id) >= 0) return;
+      let nb = near[j].filter(o => o.d <= 3).slice(0, 12).map(o => o.b);
+      let need = 0.5;
+      if (nb.length < 3) {
+        nb = near[j].filter(o => o.d <= 8).slice(0, 3).map(o => o.b);
+        need = 1;
+        if (nb.length < 3) return;
+      }
+      const c = {};
+      nb.forEach(b => { c[b.zone] = (c[b.zone] || 0) + 1; });
+      const top = Object.keys(c).map(Number).sort((x, y) => c[y] - c[x])[0];
+      if (top !== a.zone && c[top] > (c[a.zone] || 0) && c[top] / nb.length >= need) { a.zone = top; changed++; }
+    });
+    if (!changed) break;
+  }
+  numberZones_(pts);
+  sh.getRange(2, P.zone + 1, pts.length, 2).setValues(pts.map(p => [p.zone || '', p.zone ? p.n : '']));
+  props.setProperty('ZONES_VER', Utilities.getUuid().slice(0, 8)); // телефоны сбросят сохранённые списки точек
+  const movedList = pts.filter(p => p.zone !== p.was);
+  log_(agent, 'навёл порядок в зонах', '', movedList.map(p => p.id + ':' + p.was + '>' + p.zone).join(' '));
+  const sizes = [];
+  for (let z = 1; z <= ZONES; z++) sizes.push(pts.filter(p => p.zone === z).length);
+  return { moved: movedList.length, sizes };
+}
+
 /** Разбирает «R1-089=3, R2-052=5». Сначала проверяет весь список: при ошибке не меняется ничего. */
 function zonesAssign_(agent, text) {
   const pairs = String(text || '').split(/[,;\n]+/).map(s => s.trim()).filter(Boolean).map(s => {
@@ -1855,6 +1915,10 @@ function zoneSet_(agent, id, zone) {
   const { sh, rowIndex, row } = findRow_(id);
   const max = allPoints_().values.reduce((m, r) => Number(r[P.zone]) === z ? Math.max(m, Number(r[P.zoneN]) || 0) : m, 0);
   sh.getRange(rowIndex, P.zone + 1, 1, 2).setValues([[z, max + 1]]);
+  // Ручной выбор главнее автоматики: «Навести порядок» эту точку не двигает
+  const props = PropertiesService.getScriptProperties();
+  const pinned = JSON.parse(props.getProperty('ZONE_PINNED') || '[]');
+  if (pinned.indexOf(String(id)) < 0) props.setProperty('ZONE_PINNED', JSON.stringify(pinned.concat([String(id)])));
   log_(agent, 'назначил точке маршрут', id, row[P.name] + ' → ' + z);
   return zonesPreview_();
 }
