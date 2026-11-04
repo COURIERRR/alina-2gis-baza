@@ -115,12 +115,22 @@ main { padding: 8px 16px 12px; max-width: 720px; margin: 0 auto; }
 /* ---------- Нижняя панель вкладок ---------- */
 .tabbar {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 30;
-  display: flex; justify-content: space-around;
+  display: grid; grid-template-columns: 1fr 72px 1fr;
   padding: 6px 4px calc(4px + env(safe-area-inset-bottom));
   background: var(--bar-bg);
   -webkit-backdrop-filter: saturate(180%) blur(20px); backdrop-filter: saturate(180%) blur(20px);
   border-top: .5px solid var(--line);
 }
+.tb-side { display: flex; justify-content: space-around; min-width: 0; }
+/* Кнопка добавления адреса: круглая, приподнята над панелью, ровно по центру */
+.tabbar a.tb-add { max-width: none; justify-content: flex-end; color: var(--ink); font-weight: 600; }
+.tabbar a.tb-add.on { color: var(--tint); }
+.tb-add-btn {
+  position: absolute; top: -26px; left: 50%; transform: translateX(-50%);
+  width: 52px; height: 52px; border-radius: 50%; display: grid; place-items: center;
+  background: var(--accent); color: var(--accent-ink); box-shadow: 0 4px 14px rgba(0, 0, 0, .28);
+}
+.tabbar a.tb-add .tb-add-btn svg.i { width: 28px; height: 28px; stroke-width: 2.4; }
 .tabbar a {
   position: relative; flex: 1; max-width: 120px; display: flex; flex-direction: column; align-items: center; gap: 2px;
   color: var(--muted); font-size: 10.5px; font-weight: 500; letter-spacing: 0; padding: 2px 0;
@@ -398,7 +408,22 @@ table.grid td.bad { color: var(--bad); font-weight: 600; }
   -webkit-backdrop-filter: blur(20px); backdrop-filter: blur(20px);
   animation: toastIn .25s ease-out;
 }
-body.has-tabbar .toast { bottom: calc(var(--tabbar-h) + 16px + env(safe-area-inset-bottom)); }
+body.has-tabbar .toast { bottom: calc(var(--tabbar-h) + 36px + env(safe-area-inset-bottom)); }
+
+/* Уведомление «рядом есть точка» */
+.nearby {
+  position: fixed; left: 12px; right: 12px; top: calc(56px + env(safe-area-inset-top)); z-index: 40;
+  max-width: 520px; margin: 0 auto; padding: 12px 14px; border-radius: 16px;
+  background: var(--card); border: 1px solid var(--line); box-shadow: 0 10px 34px rgba(0, 0, 0, .28);
+  animation: toastIn .25s ease-out;
+}
+.nearby[hidden] { display: none; }
+.near-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 4px; }
+.near-head button { width: 32px; height: 32px; border: 0; border-radius: 50%; background: var(--chip); font-size: 20px; line-height: 1; flex: none; }
+.nearby a { display: flex; align-items: center; gap: 8px; padding: 8px 0; color: var(--ink); border-top: .5px solid var(--line); }
+.nearby .grow { flex: 1; min-width: 0; }
+.pos-line { font-size: 13px; margin: -6px 0 8px; }
+.pos-line:empty { display: none; }
 .toast.err { background: rgba(215, 40, 32, .95); }
 @keyframes toastIn { from { opacity: 0; transform: translateY(12px); } }
 

@@ -20,11 +20,12 @@ const PIN_TRIES = 5;    // неверных PIN подряд до блокиро
 const P = {
   id: 0, route: 1, n: 2, name: 3, type: 4, address: 5,
   lat: 6, lon: 7, acc: 8, status: 9, agent: 10, claimed: 11, done: 12,
-  phone: 13, whatsapp: 14, gis: 15, visits: 16, last: 17,
+  phone: 13, whatsapp: 14, gis: 15, visits: 16, last: 17, added: 18,
 };
 const POINTS_HEADER = ['id', 'Маршрут', '№', 'Точка', 'Тип', 'Адрес',
   'lat', 'lon', 'Точность', 'Статус', 'Агент', 'Взята', 'Выполнена',
-  'Телефон', 'WhatsApp', 'Ссылка 2ГИС', 'Визитов', 'Последний визит'];
+  'Телефон', 'WhatsApp', 'Ссылка 2ГИС', 'Визитов', 'Последний визит', 'Добавил'];
+const NEW_POINTS_TITLE = 'Новые точки'; // маршрут для точек, которые агенты добавляют с места
 
 const ST_FREE = 'свободна';
 const ST_WORK = 'в работе';
@@ -207,7 +208,7 @@ function addRoutes_(routes) {
     const has = p.lat != null && p.lon != null;
     rows.push([p.id, r.route, p.n, p.name, p.type, p.address,
       has ? p.lat : '', has ? p.lon : '', has ? 'точно' : '', ST_FREE, '', '', '',
-      p.phone || '', p.whatsapp || '', p.gis || '', '', '']);
+      p.phone || '', p.whatsapp || '', p.gis || '', '', '', '']);
   }));
   if (rows.length) {
     const range = sh.getRange(sh.getLastRow() + 1, 1, rows.length, POINTS_HEADER.length);
@@ -322,6 +323,10 @@ function doPost(e) {
       case 'complete': return withLock_(() => complete_(body.id, agent, body.form || {}, body.photos || []));
       case 'update': return withLock_(() => update_(body.id, agent, body.form || {}, body.photos || []));
       case 'remove': return withLock_(() => remove_(body.id, agent));
+      case 'pointAdd': return withLock_(() => pointAdd_(agent, body.point || {}));
+      case 'addrAt': return { address: addrAt_(body.lat, body.lon) };
+      case 'pos': return pos_(me, body.geo); // без блокировки и сброса кэша: приходит часто и данных точек не меняет
+      case 'positions': requireManager_(me); return { positions: positions_() };
       case 'taskCreate': return withLock_(() => taskCreate_(agent, body.point, body.items || [], body.due));
       case 'taskTake': return withLock_(() => taskTake_(agent, body.id));
       case 'taskRelease': return withLock_(() => taskRelease_(agent, body.id));
@@ -435,8 +440,76 @@ function toPoint_(row) {
     acc: String(row[P.acc] || ''),
     status: String(row[P.status] || ST_FREE), agent: String(row[P.agent] || ''),
     phone: String(row[P.phone] || ''), whatsapp: String(row[P.whatsapp] || ''), gis: String(row[P.gis] || ''),
-    visits: visitsOf_(row), lastVisit: fmt_(row[P.last] || row[P.done]),
+    visits: visitsOf_(row), lastVisit: fmt_(row[P.last] || row[P.done]), added: String(row[P.added] || ''),
   };
+}
+
+/** Новая точка с места: всегда новая строка в конце листа и в маршруте «Новые точки», остальные точки не меняются. */
+function pointAdd_(agent, f) {
+  const name = String(f.name || '').trim();
+  const address = String(f.address || '').trim();
+  if (!name) fail_('Укажите название точки');
+  if (!address) fail_('Укажите адрес точки');
+  const lat = Number(f.lat), lon = Number(f.lon);
+  const has = f.lat != null && f.lon != null && isFinite(lat) && isFinite(lon);
+  const { sh, values } = allPoints_();
+  const props = PropertiesService.getScriptProperties();
+  let route = Number(props.getProperty('NEW_POINTS_ROUTE'));
+  if (!route) {
+    route = values.reduce((m, r) => Math.max(m, Number(r[P.route]) || 0), 0) + 1;
+    props.setProperty('NEW_POINTS_ROUTE', String(route));
+    const titles = JSON.parse(props.getProperty('ROUTE_TITLES') || '{}');
+    titles[route] = NEW_POINTS_TITLE;
+    props.setProperty('ROUTE_TITLES', JSON.stringify(titles));
+  }
+  const inRoute = values.filter(r => Number(r[P.route]) === route);
+  // Повторная отправка (ответ потерялся) не создаёт дубль
+  const same = inRoute.find(r => String(r[P.name]) === name && String(r[P.address]) === address);
+  if (same) return { point: toPoint_(same) };
+  const n = inRoute.reduce((m, r) => Math.max(m, Number(r[P.n]) || 0), 0) + 1;
+  const id = 'R' + route + '-' + String(n).padStart(3, '0');
+  const row = [id, route, n, name, String(f.type || '').trim(), address,
+    has ? lat : '', has ? lon : '', has ? 'точно' : '', ST_FREE, '', '', '',
+    String(f.phone || '').trim(), '', '', '', '', agent];
+  const range = sh.getRange(sh.getLastRow() + 1, 1, 1, POINTS_HEADER.length);
+  range.offset(0, P.phone, 1, 2).setNumberFormat('@');
+  range.setValues([row]);
+  resultSheet_(route);
+  log_(agent, 'добавил точку', id, name + ' · ' + address);
+  return { point: toPoint_(row) };
+}
+
+/** Адрес по координатам телефона. Пусто, если адрес не определился — агент введёт его вручную. */
+function addrAt_(lat, lon) {
+  const la = Number(lat), lo = Number(lon);
+  if (!isFinite(la) || !isFinite(lo)) fail_('Нет координат');
+  const r = Maps.newGeocoder().setLanguage('ru').setRegion('kz').reverseGeocode(la, lo);
+  const best = r.status === 'OK' && (r.results || []).find(x => (x.types || []).indexOf('plus_code') < 0);
+  if (!best) return '';
+  return String(best.formatted_address || '')
+    .replace(/,?\s*Казахстан\s*$/i, '').replace(/,?\s*\b\d{6}\b/g, '').trim();
+}
+
+/* ---------------- Местоположение сотрудников ----------------
+ * Последняя позиция каждого хранится в свойствах скрипта: приходит часто, в таблицы не пишется и точек не касается. */
+const POS_PREFIX = 'pos:';
+
+function pos_(me, geo) {
+  const lat = Number(geo && geo.lat), lon = Number(geo && geo.lon);
+  if (!geo || geo.lat == null || geo.lon == null || !isFinite(lat) || !isFinite(lon)) return {};
+  PropertiesService.getScriptProperties().setProperty(POS_PREFIX + nameKey_(me.name), JSON.stringify({
+    name: me.name, lat, lon, acc: Math.round(Number(geo.acc)) || 0, t: nowIso_(),
+  }));
+  return {};
+}
+
+function positions_() {
+  const active = {};
+  cached_('staff', 600, staff_).forEach(s => { if (s.status !== ST_BLOCKED) active[nameKey_(s.name)] = true; });
+  const all = PropertiesService.getScriptProperties().getProperties();
+  return Object.keys(all)
+    .filter(k => k.indexOf(POS_PREFIX) === 0 && active[k.slice(POS_PREFIX.length)])
+    .map(k => JSON.parse(all[k]));
 }
 
 function summary_() {

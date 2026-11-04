@@ -7,7 +7,7 @@
   const ASSORTMENT = ['ВД-краски', 'Эмали', 'Грунтовки', 'Лаки и пропитки', 'Шпатлёвки и штукатурки',
     'Клей', 'Герметики и пена', 'Растворители', 'Колеровка', 'Инструмент'];
   const COMPETITORS = ['Tikkurila', 'Dulux', 'Alpina', 'Caparol', 'Ceresit', 'Knauf', 'Текс',
-    'VGT', 'Лакра', 'Eskaro', 'Marshall', 'Местные / Китай'];
+    'VGT', 'Лакра', 'Eskaro', 'Marshall', 'Tytan', 'Akfix', 'GNS', 'Радуга', 'Sika', 'Местные / Китай'];
   const OUR_BRANDS = ['AlinEX', 'НАШИ', 'Norma', 'Alina Paint', 'Алкиды', 'FAWORI', 'V-tech'];
   const ALINA = ['Работаем', 'Не работаем'];
   const OLD_ALINA = { 'Да, работают': 'Работаем', 'Нет': 'Не работаем' }; // ответы старых анкет
@@ -214,8 +214,9 @@
     }
     const get = (action, q) => fetch(url + '?' + new URLSearchParams(Object.assign({ action, token: me.token }, q)))
       .then(parse);
-    const post = (action, body) => fetch(url, {
+    const post = (action, body, keepalive) => fetch(url, {
       method: 'POST',
+      keepalive: !!keepalive,
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
       body: JSON.stringify(Object.assign({ action, token: me.token }, body)),
     }).then(parse);
@@ -230,6 +231,10 @@
       history: (id) => get('history', { id }).then((d) => d.visits),
       update: (id, form, photos) => post('update', { id, form, photos }).then((d) => d.point),
       remove: (id) => post('remove', { id }).then((d) => d.point),
+      pointAdd: (point) => post('pointAdd', { point }).then((d) => d.point),
+      addrAt: (lat, lon) => post('addrAt', { lat, lon }).then((d) => d.address),
+      pos: (geo, keepalive) => post('pos', { geo }, keepalive),
+      positions: () => post('positions', {}).then((d) => d.positions),
       tasks: (point) => get('tasks', point ? { point } : {}).then((d) => d.tasks),
       taskCreate: (point, items, due) => post('taskCreate', { point, items, due }).then((d) => d.tasks),
       taskTake: (id) => post('taskTake', { id }).then((d) => d.task),
@@ -268,12 +273,17 @@
     const all = async () => {
       const s = state();
       const out = [];
-      (await load()).routes.forEach((r) => r.points.forEach((p) => {
+      (await load()).routes.concat(addedRoute()).forEach((r) => r.points.forEach((p) => {
         const st = s[p.id] || {};
         out.push(Object.assign({ route: r.route, lat: null, lon: null, acc: p.lat != null ? 'точно' : '' }, p,
           { status: st.status || 'свободна', agent: st.agent || '', visits: st.visits || 0, lastVisit: fmtTime(st.last) }));
       }));
       return out;
+    };
+    // Добавленные с места точки — отдельным маршрутом за последним из файла
+    const addedRoute = () => {
+      const points = store.get('mock:added', []);
+      return points.length ? [{ route: base.routes[base.routes.length - 1].route + 1, title: 'Новые точки', points }] : [];
     };
     const fail = (m, code) => { const e = new Error(m); e.server = true; e.code = code || ''; throw e; };
     const find = async (id) => (await all()).find((x) => x.id === id) || fail('Точка не найдена');
@@ -313,13 +323,36 @@
         const by = {};
         (await all()).forEach((p) => {
           const r = by[p.route] || (by[p.route] = { route: p.route,
-            title: (base.routes.find((x) => x.route === p.route) || {}).title || '', total: 0, free: 0, work: 0, done: 0 });
+            title: (base.routes.concat(addedRoute()).find((x) => x.route === p.route) || {}).title || '', total: 0, free: 0, work: 0, done: 0 });
           r.total++;
           if (p.status === 'выполнена') r.done++; else if (p.status === 'в работе') r.work++; else r.free++;
         });
         return wait(Object.values(by));
       },
       points: async (route) => wait((await all()).filter((p) => p.route === Number(route))),
+      pointAdd: async (f) => {
+        await load();
+        if (!f.name) fail('Укажите название точки');
+        if (!f.address) fail('Укажите адрес точки');
+        const added = store.get('mock:added', []);
+        const same = added.find((x) => x.name === f.name && x.address === f.address);
+        if (same) return find(same.id);
+        const route = base.routes[base.routes.length - 1].route + 1;
+        const n = added.length + 1;
+        const id = 'R' + route + '-' + String(n).padStart(3, '0');
+        added.push({ id, n, name: f.name, type: f.type || '', address: f.address, phone: f.phone || '', lat: f.lat == null ? null : f.lat, lon: f.lon == null ? null : f.lon, added: me.agent });
+        store.set('mock:added', added);
+        log(me.agent, 'добавил точку', id, f.name + ' · ' + f.address);
+        return wait(await find(id));
+      },
+      addrAt: () => wait('Алматы, демо-адрес по геолокации'),
+      pos: (geo) => {
+        const db = store.get('mock:pos', {});
+        db[me.agent] = Object.assign({ name: me.agent, t: new Date().toISOString() }, geo);
+        store.set('mock:pos', db);
+        return wait({});
+      },
+      positions: () => wait(Object.values(store.get('mock:pos', {}))),
       claim: async (id) => {
         const p = await find(id);
         if (p.status === 'выполнена') fail('Точка уже выполнена (' + p.agent + ')');
@@ -625,15 +658,19 @@
     document.body.classList.toggle('has-tabbar', authed);
     if (!authed) return;
     const h = location.hash.replace(/^#\/?/, '');
-    const cur = /^(tasks|td\/)/.test(h) ? 'tasks'
+    const cur = h === 'add' ? 'add' : /^(tasks|td\/)/.test(h) ? 'tasks'
       : /^(stats|staff|teammap)/.test(h) || (/^me\/./.test(h) && isManager()) ? 'stats'
       : /^(me|pin)/.test(h) ? 'me' : 'home';
     const c = cache.tasks ? taskCounts(cache.tasks) : null;
     const tabs = [['home', '#/', 'Сегодня', I.home], ['tasks', '#/tasks', 'Задания', I.tasks]]
       .concat(isManager() ? [['stats', '#/stats', 'Команда', I.team]] : [])
       .concat([['me', '#/me', 'Профиль', I.person]]);
-    tb.innerHTML = tabs.map((t) => `<a href="${t[1]}" class="${cur === t[0] ? 'on' : ''}">${t[3]}${t[2]}
-      ${t[0] === 'tasks' && c && c.mine + c.free ? `<span class="tb-badge">${c.mine + c.free}</span>` : ''}</a>`).join('');
+    const tab = (t) => `<a href="${t[1]}" class="${cur === t[0] ? 'on' : ''}">${t[3]}${t[2]}
+      ${t[0] === 'tasks' && c && c.mine + c.free ? `<span class="tb-badge">${c.mine + c.free}</span>` : ''}</a>`;
+    // Кнопка добавления — посередине, вкладки по бокам
+    tb.innerHTML = `<div class="tb-side">${tabs.slice(0, 2).map(tab).join('')}</div>
+      <a class="tb-add${cur === 'add' ? ' on' : ''}" href="#/add" aria-label="Добавить адрес"><span class="tb-add-btn">${I.plus}</span>Адрес</a>
+      <div class="tb-side">${tabs.slice(2).map(tab).join('')}</div>`;
   }
 
   function stopRefresh() { clearInterval(refreshTimer); refreshTimer = null; currentLoad = null; }
@@ -642,10 +679,13 @@
     stopRefresh();
     updateBanner();
     window.scrollTo(0, 0);
+    if (!me.token || !unlocked) { stopTracking(); hideNearby(); }
     if (!me.token) return loginView();
     if (!unlocked) return lockView();
+    startTracking();
     const h = location.hash.replace(/^#\/?/, '');
     let m;
+    if (h === 'add') return addView();
     if ((m = h.match(/^r\/(\d+)$/))) return listView(Number(m[1]));
     if ((m = h.match(/^map\/(\d+)$/))) return mapView(Number(m[1]));
     if ((m = h.match(/^p\/(R\d+-\d+)$/))) return pointView(m[1]);
@@ -1004,6 +1044,18 @@
     store.set('cache:tasks', cache.tasks);
   }
 
+  // АКБ: все загруженные точки и сколько из них выполнено, по всем маршрутам вместе
+  function akbCard(routes) {
+    if (!routes || !routes.length) return '';
+    const sum = (k) => routes.reduce((s, r) => s + (r[k] || 0), 0);
+    const total = sum('total'), done = sum('done'), work = sum('work'), free = sum('free');
+    const pct = total ? done / total * 100 : 0;
+    return `<div class="card akb"><div class="goal-main">${ring(Math.round(pct), 72)}
+      <div class="grow"><div class="muted">АКБ · все маршруты</div>
+        <div class="goal-num">${done} <span>из ${total}</span></div>
+        <div class="muted" style="font-size:13px">выполнено ${String(Math.round(pct * 10) / 10).replace('.', ',')}% · в работе ${work} · свободно ${free}</div></div></div></div>`;
+  }
+
   function homeView() {
     setBar('Сегодня');
     const isHome = () => location.hash.replace(/^#\/?/, '') === '';
@@ -1019,7 +1071,7 @@
     };
     const render = (routes) => {
       $app.innerHTML = `<div class="subtitle">${esc(me.agent.split(' ')[0])} · ${esc(dateLine)}</div>` +
-        goalCard(cache.me['|day']) + tasksRow() +
+        goalCard(cache.me['|day']) + akbCard(routes) + tasksRow() +
         '<div class="section-title">Маршруты</div>' + (routes ? '<div class="list">' + routes.map((r) => {
           const pd = r.total ? (r.done / r.total) * 100 : 0;
           const pw = r.total ? (r.work / r.total) * 100 : 0;
@@ -1029,7 +1081,8 @@
               <span class="progress" style="display:flex"><span class="done" style="width:${pd}%"></span><span class="work" style="width:${pw}%"></span></span>
               <span class="ri-sub">Выполнено ${r.done} из ${r.total}${r.work ? ' · в работе ' + r.work : ''}</span></span>
             ${chev}</a>`;
-        }).join('') + '</div><p class="muted" style="text-align:center">Старт: Алматы, Казыбаева 20</p>' : '<div class="spinner">Загрузка…</div>');
+        }).join('') + `</div><p class="muted" style="text-align:center">Старт: Алматы, Казыбаева 20</p>
+          <p class="muted" style="text-align:center;font-size:13px">Пока приложение открыто, руководитель видит ваше местоположение на карте команды.</p>` : '<div class="spinner">Загрузка…</div>');
       if ($('homeDay')) $('homeDay').onclick = async (ev) => {
         ev.target.disabled = true;
         ev.target.textContent = 'Определяем местоположение…';
@@ -1139,6 +1192,184 @@
       () => { toast('Разрешите доступ к геолокации в настройках Safari', true); ui.sort = 'order'; done(); },
       { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 });
   }
+
+  /* ---------- Новая точка с места ---------- */
+  function freshGeo() {
+    return new Promise((resolve, reject) => {
+      if (!navigator.geolocation) return reject(new Error('Геолокация недоступна'));
+      navigator.geolocation.getCurrentPosition(
+        (pos) => resolve({ lat: pos.coords.latitude, lon: pos.coords.longitude, acc: Math.round(pos.coords.accuracy) }),
+        () => reject(new Error('Разрешите доступ к геолокации в настройках Safari')),
+        { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 });
+    });
+  }
+
+  function addView() {
+    setBar('Новый адрес', '#/');
+    const hash = location.hash;
+    const draft = store.get('add:draft', {});
+    let geo = draft.lat != null ? { lat: draft.lat, lon: draft.lon, acc: draft.acc } : null;
+    $app.innerHTML = `
+      <div class="card">
+        <p class="muted" style="margin:0 0 10px">Точки нет в базе? Приехали на место — нажмите кнопку, и адрес подтянется из геолокации телефона.</p>
+        <button class="btn primary" id="here" type="button">${I.pin} Я на месте</button>
+        <div class="muted" id="hereInfo" style="font-size:13px;margin-top:8px">${geo ? 'Координаты получены' + (geo.acc ? ', точность ±' + esc(geo.acc) + ' м' : '') : ''}</div>
+        <div id="hereNear"></div>
+      </div>
+      <form class="card" id="addf" autocomplete="off">
+        <div class="field"><label>Название точки <span class="req">*</span></label><input type="text" name="name" placeholder="Например: Строймаркет" value="${esc(draft.name || '')}"></div>
+        <div class="field"><label>Адрес <span class="req">*</span></label><textarea name="address" placeholder="Нажмите «Я на месте» или введите вручную">${esc(draft.address || '')}</textarea></div>
+        <div class="field"><label>Тип</label><input type="text" name="type" placeholder="Строительный магазин" value="${esc(draft.type || '')}"></div>
+        <div class="field"><label>Телефон</label><input type="tel" name="phone" placeholder="+7" value="${esc(draft.phone || '')}"></div>
+        <button class="btn ok" type="submit" id="addgo">${I.plus} Добавить точку</button>
+        <p class="muted" style="font-size:13px;margin:10px 0 0">Точка попадёт в маршрут «Новые точки». После этого откроется её анкета.</p>
+      </form>`;
+    const f = $('addf');
+    const saveDraft = () => store.set('add:draft', {
+      name: f.elements.name.value, address: f.elements.address.value, type: f.elements.type.value, phone: f.elements.phone.value,
+      lat: geo ? geo.lat : null, lon: geo ? geo.lon : null, acc: geo ? geo.acc : null,
+    });
+    f.oninput = saveDraft;
+    // Чтобы не завести дубль: точки из базы в пределах 100 м от этого места
+    const showNear = () => {
+      if (!geo || !$('hereNear')) return;
+      const near = pointsNear(geo, 0.1).slice(0, 5);
+      $('hereNear').innerHTML = near.length ? `<div class="sub-label" style="margin-left:0">Уже есть в базе рядом — может, это одна из них?</div>
+        <div class="list" style="margin-bottom:0">${near.map((x) => `<a class="row-item" href="#/p/${x.p.id}"><span class="grow"><span class="ri-title">${esc(x.p.name)}</span>
+          <span class="ri-sub" style="display:block">${Math.round(x.d * 1000)} м · ${esc(cleanAddr(x.p.address))}</span></span>${chev}</a>`).join('')}</div>` : '';
+    };
+    showNear();
+    $('here').onclick = async (ev) => {
+      const btn = ev.currentTarget;
+      const info = $('hereInfo');
+      btn.disabled = true;
+      info.textContent = 'Определяем местоположение…';
+      try {
+        geo = await freshGeo();
+      } catch (e) {
+        btn.disabled = false;
+        info.textContent = '';
+        return toast(e.message, true);
+      }
+      if (location.hash !== hash) return;
+      const coords = 'Координаты получены, точность ±' + geo.acc + ' м';
+      info.textContent = coords + '. Определяем адрес…';
+      saveDraft();
+      showNear();
+      let address = '';
+      try { address = await api.addrAt(geo.lat, geo.lon); } catch (e) { /* без адреса — введут вручную, координаты останутся */ }
+      if (location.hash !== hash) return;
+      btn.disabled = false;
+      if (address) f.elements.address.value = address;
+      info.textContent = address ? coords + (geo.acc > 100 ? '. Проверьте адрес: точность низкая' : '') : coords + '. Адрес не определился — введите вручную';
+      saveDraft();
+    };
+    f.onsubmit = async (ev) => {
+      ev.preventDefault();
+      const name = f.elements.name.value.trim();
+      const address = f.elements.address.value.trim();
+      if (!name) return toast('Укажите название точки', true);
+      if (!address) return toast('Укажите адрес: нажмите «Я на месте» или введите вручную', true);
+      const btn = $('addgo');
+      btn.disabled = true;
+      try {
+        const p = await api.pointAdd({ name, address, type: f.elements.type.value.trim(), phone: f.elements.phone.value.trim(),
+          lat: geo ? geo.lat : null, lon: geo ? geo.lon : null });
+        const list = cachedPoints(p.route) || [];
+        if (!list.some((x) => x.id === p.id)) list.push(p);
+        cache.points[p.route] = list;
+        store.set('cache:points:' + p.route, list);
+        store.del('add:draft');
+        toast('Точка добавлена');
+        refreshAll().catch(() => {});
+        location.hash = '#/p/' + p.id;
+      } catch (e) {
+        btn.disabled = false;
+        toast(e.server ? e.message : 'Нет связи. Данные сохранены здесь, попробуйте ещё раз', true);
+      }
+    };
+  }
+
+  /* ---------- Местоположение: карта команды и точки рядом ----------
+   * Браузер отдаёт координаты, только пока приложение открыто на экране. При сворачивании отправляется последнее
+   * известное место — его и показывает карта команды, пока приложение закрыто. */
+  const POS_SEND_MS = 45000;    // как часто отправлять, если человек стоит
+  const POS_MOVED_MS = 15000;   // и чаще, если он сдвинулся
+  const POS_MOVED_KM = 0.05;
+  const NEAR_KM = 0.5;          // точки в этом радиусе считаются рядом
+  const NEAR_CHECK_MS = 20000;
+  const DRIVING_MS = 5;         // быстрее ~18 км/ч — человек за рулём, «рядом» не показываем
+  let watchId = null;
+  let lastPos = null;
+  let lastSent = null;
+  let lastNearCheck = 0;
+
+  function startTracking() {
+    if (watchId != null || !navigator.geolocation || document.hidden || !me.token || !unlocked) return;
+    watchId = navigator.geolocation.watchPosition(onPosition, () => {},
+      { enableHighAccuracy: true, maximumAge: 15000, timeout: 30000 });
+  }
+  function stopTracking() {
+    if (watchId != null) navigator.geolocation.clearWatch(watchId);
+    watchId = null;
+  }
+  function onPosition(pos) {
+    if (!me.token || !unlocked) return;
+    const g = { lat: pos.coords.latitude, lon: pos.coords.longitude, acc: Math.round(pos.coords.accuracy) };
+    const now = Date.now();
+    lastPos = g;
+    const since = lastSent ? now - lastSent.t : Infinity;
+    if (since >= POS_SEND_MS || (since >= POS_MOVED_MS && km(lastSent, g) >= POS_MOVED_KM)) {
+      lastSent = Object.assign({ t: now }, g);
+      api.pos(g).catch(() => {});
+    }
+    if (now - lastNearCheck >= NEAR_CHECK_MS && !(pos.coords.speed > DRIVING_MS)) {
+      lastNearCheck = now;
+      checkNearby(g);
+    }
+  }
+  function sendLastPosition() {
+    if (lastPos && me.token && unlocked) api.pos(lastPos, true).catch(() => {});
+  }
+
+  // Точки всех маршрутов, сохранённые на телефоне
+  function allCachedPoints() {
+    const out = [];
+    (cache.summary || []).forEach((r) => {
+      const list = cachedPoints(r.route);
+      if (list) { cache.points[r.route] = list; out.push.apply(out, list); }
+    });
+    return out;
+  }
+  function pointsNear(g, maxKm) {
+    return allCachedPoints().filter(hasCoords).map((p) => ({ p, d: km(g, p) }))
+      .filter((x) => x.d <= maxKm).sort((a, b) => a.d - b.d);
+  }
+
+  // Каждая точка показывается один раз в день, чтобы уведомление не повторялось на месте
+  function checkNearby(g) {
+    const day = today();
+    const seen = store.get('near:seen', {});
+    const ids = seen.day === day ? seen.ids : [];
+    const current = (location.hash.match(/^#\/p\/(.+)$/) || [])[1];
+    const fresh = pointsNear(g, NEAR_KM).filter((x) => x.p.id !== current && ids.indexOf(x.p.id) < 0 && !isPending(x.p.id)
+      && (x.p.status === 'свободна' || (x.p.status === 'в работе' && x.p.agent === me.agent)));
+    if (!fresh.length) return;
+    store.set('near:seen', { day, ids: ids.concat(fresh.map((x) => x.p.id)) });
+    showNearby(fresh);
+  }
+  function showNearby(items) {
+    const box = $('nearby');
+    const more = items.length - 3;
+    box.innerHTML = `<div class="near-head"><b>Рядом есть ${items.length > 1 ? 'точки' : 'точка'} — навестите</b>
+        <button type="button" id="nearClose" aria-label="Закрыть">×</button></div>
+      ${items.slice(0, 3).map((x) => `<a href="#/p/${x.p.id}"><span class="grow">${esc(x.p.name)}</span><span class="dist">${Math.round(x.d * 1000)} м</span>${chev}</a>`).join('')}
+      ${more > 0 ? `<div class="muted" style="font-size:13px">и ещё ${more} в радиусе 500 м</div>` : ''}`;
+    box.hidden = false;
+    box.onclick = (ev) => { if (ev.target.closest('a,#nearClose')) hideNearby(); };
+    if (navigator.vibrate) navigator.vibrate(200);
+  }
+  function hideNearby() { $('nearby').hidden = true; }
 
   /* ---------- Фото ---------- */
   function bindPhotos(input, box, list, max) {
@@ -1269,7 +1500,7 @@
       ].join('');
       $app.innerHTML = `
         <div class="card point-head">
-          <div class="muted">№ ${p.n}${p.type ? ' · ' + esc(p.type) : ''}</div>
+          <div class="muted">№ ${p.n}${p.type ? ' · ' + esc(p.type) : ''}${p.added ? ' · добавил(а) ' + esc(p.added) : ''}</div>
           <h2>${esc(p.name)}</h2>
           <div class="addr">${esc(p.address)}</div>
           ${p.phone ? `<div class="addr">${esc(p.phone)}</div>` : ''}
@@ -2138,28 +2369,57 @@
     setBar('Карта команды', '#/stats');
     const hash = location.hash;
     $app.innerHTML = '<div class="spinner">Загрузка карты…</div>';
-    let s;
+    let s, positions;
     try {
       await loadLeaflet();
-      s = await api.stats(periodStart('day'));
+      [s, positions] = await Promise.all([api.stats(periodStart('day')), api.positions()]);
     } catch (e) { return showError(e, teamMapView); }
     if (location.hash !== hash) return;
     const team = s.today || [];
+    const keyOf = (name) => String(name || '').trim().replace(/\s+/g, ' ').toLowerCase().replace(/ё/g, 'е');
     $app.innerHTML = `
       <div class="map" id="map"></div>
-      <div class="map-legend"><span><i style="background:#2a3b7e"></i>последний визит</span><span><i style="background:#1f8a4c"></i>начало дня</span></div>
-      <div class="card">${team.length ? team.map(teamRow).join('') : '<div class="muted">Сегодня ещё никто не работал</div>'}</div>`;
+      <div class="map-legend"><span><i style="background:#34c759"></i>приложение открыто</span><span><i style="background:#8e8e93"></i>закрыто: последнее место</span>
+        <span><i style="background:#2a3b7e"></i>последний визит</span><span><i style="background:#f0a24a"></i>начало дня</span></div>
+      <div class="card">${team.length ? team.map((a) => teamRow(a) + `<div class="muted pos-line" data-who="${esc(keyOf(a.name))}"></div>`).join('') : '<div class="muted">Сегодня ещё никто не работал</div>'}</div>`;
     const map = newMap();
+    map.setView(ALMATY, 11); // до добавления маркеров: иначе Leaflet откладывает их отрисовку, и bringToFront падает
     const marks = [];
     team.forEach((a) => {
-      if (a.startPos) marks.push(L.circleMarker([a.startPos.lat, a.startPos.lon], { radius: 6, color: '#fff', weight: 2, fillColor: '#1f8a4c', fillOpacity: 0.9 })
+      if (a.startPos) marks.push(L.circleMarker([a.startPos.lat, a.startPos.lon], { radius: 6, color: '#fff', weight: 2, fillColor: '#f0a24a', fillOpacity: 0.9 })
         .bindPopup(`<b>${esc(a.name)}</b><br>Начал день ${a.start ? hm(a.start) : ''}`).addTo(map));
-      if (a.lastPos) marks.push(L.circleMarker([a.lastPos.lat, a.lastPos.lon], { radius: 9, color: '#fff', weight: 2, fillColor: '#2a3b7e', fillOpacity: 0.95 })
-        .bindTooltip(esc(a.name), { permanent: true, direction: 'top', offset: [0, -8] })
-        .bindPopup(`<b>${esc(a.name)}</b><br>${hm(a.lastPos.time)} · ${esc(a.lastPos.point || '')}<br>
+      if (a.lastPos) marks.push(L.circleMarker([a.lastPos.lat, a.lastPos.lon], { radius: 7, color: '#fff', weight: 2, fillColor: '#2a3b7e', fillOpacity: 0.95 })
+        .bindPopup(`<b>${esc(a.name)}</b><br>Визит ${hm(a.lastPos.time)} · ${esc(a.lastPos.point || '')}<br>
           ${a.lastPos.id ? `<a href="#/p/${esc(a.lastPos.id)}">Открыть точку ›</a> · ` : ''}<a href="#/me/${encodeURIComponent(a.name)}">Кабинет ›</a>`).addTo(map));
     });
-    if (marks.length) map.fitBounds(L.featureGroup(marks).getBounds().pad(0.2), { maxZoom: 15 }); else map.setView(ALMATY, 11);
+    // Люди: маркеры двигаются на месте, карта не прыгает при обновлении
+    const people = {};
+    const ONLINE_MS = 3 * 60000;
+    const seenText = (x) => Date.now() - Date.parse(x.t) < ONLINE_MS
+      ? 'Приложение открыто · обновлено ' + hm(x.t) : 'Приложение закрыто · последнее место ' + fmtTime(x.t);
+    const drawPeople = (list) => {
+      list.forEach((x) => {
+        const key = keyOf(x.name);
+        const fill = Date.now() - Date.parse(x.t) < ONLINE_MS ? '#34c759' : '#8e8e93';
+        const popup = `<b>${esc(x.name)}</b><br>${esc(seenText(x))}<br><a href="#/me/${encodeURIComponent(x.name)}">Кабинет ›</a>`;
+        if (people[key]) {
+          people[key].setLatLng([x.lat, x.lon]).setStyle({ fillColor: fill }).setPopupContent(popup);
+        } else {
+          people[key] = L.circleMarker([x.lat, x.lon], { radius: 10, color: '#fff', weight: 3, fillColor: fill, fillOpacity: 1 })
+            .bindTooltip(esc(x.name), { permanent: true, direction: 'top', offset: [0, -9] })
+            .bindPopup(popup).addTo(map);
+          marks.push(people[key]);
+        }
+        people[key].bringToFront();
+        const line = $app.querySelector('.pos-line[data-who="' + key.replace(/["\\]/g, '\\$&') + '"]');
+        if (line) line.textContent = seenText(x);
+      });
+    };
+    drawPeople(positions);
+    if (marks.length) map.fitBounds(L.featureGroup(marks).getBounds().pad(0.2), { maxZoom: 15 });
+    const load = () => api.positions().then((list) => { if (location.hash === hash) drawPeople(list); }).catch(() => {});
+    currentLoad = load;
+    refreshTimer = setInterval(load, 20000);
   }
 
   function compress(file) {
@@ -2185,8 +2445,14 @@
   window.addEventListener('hashchange', route);
   window.addEventListener('online', flushOutbox);
   document.addEventListener('visibilitychange', () => {
-    if (document.hidden) { store.set('hiddenAt', Date.now()); return; }
+    if (document.hidden) {
+      store.set('hiddenAt', Date.now());
+      sendLastPosition();
+      stopTracking();
+      return;
+    }
     if (unlocked && Date.now() - (store.get('hiddenAt', 0) || 0) > LOCK_AFTER) return lock();
+    startTracking();
     flushOutbox();
     if (currentLoad) currentLoad();
   });
