@@ -10,6 +10,7 @@ const TASKS_SHEET = 'Задания';
 const LOG_SHEET = 'Журнал';
 const STAFF_SHEET = 'Сотрудники';
 const DAY_SHEET = 'День';
+const BANNERS_SHEET = 'Заявки на баннеры';
 const PHOTO_ROOT = 'Alina 2GIS фото';
 const TZ = 'Asia/Almaty';
 const FAR_METERS = 300; // визит дальше этого от точки — «далеко от точки» в статистике
@@ -110,6 +111,10 @@ const TS_NEW = 'новое';
 const TS_WORK = 'в работе';
 const TS_DONE = 'выполнено';
 const TS_CANCEL = 'отменено';
+
+// Копия заявок на баннеры: сами заявки живут на их сервере, здесь — для руководителя
+const B = { time: 0, number: 1, agent: 2, pointId: 3, point: 4, city: 5, address: 6, title: 7, size: 8, urgency: 9, qty: 10, photos: 11, fileUrl: 12, folder: 13 };
+const BANNERS_HEADER = ['Время', 'Номер', 'Сотрудник', 'id точки', 'Точка', 'Город', 'Адрес', 'Что нужно', 'Размер', 'Срочность', 'Кол-во', 'Фото', 'Файл', 'Папка'];
 
 const LOG_HEADER = ['Время', 'Агент', 'Действие', 'id', 'Детали'];
 
@@ -407,6 +412,8 @@ function doPost(e) {
       case 'boot': return boot_(me, Number(body.from) || 0);
       case 'stats': requireManager_(me); return { stats: statsCached_(Number(body.from) || 0) };
       case 'staff': requireManager_(me); return { staff: cached_('staff', 600, staff_) };
+      case 'bannerLog': return withLock_(() => bannerLog_(agent, body.rec || {}));
+      case 'banners': requireManager_(me); return { banners: cached_('banners:' + (Number(body.from) || 0), 300, () => banners_(Number(body.from) || 0)) };
       case 'zones': requireManager_(me); return { zones: zonesPreview_() };
       case 'zonesBuild': requireManager_(me); return { zones: zonesBuild_() };
       case 'zoneSet': requireManager_(me); return { zones: withLock_(() => zoneSet_(me.name, body.id, body.zone)) };
@@ -1946,6 +1953,42 @@ function zonesEnable_(agent, on) {
   return zonesPreview_();
 }
 
+/* ---------------- Заявки на баннеры ---------------- */
+
+/** Копия отправленной заявки. Сотрудник — из токена; повтор той же заявки не создаёт вторую строку. */
+function bannerLog_(agent, rec) {
+  const number = String(rec.number || '').trim();
+  if (!number) fail_('Нет номера заявки');
+  const sh = bannersSheet_();
+  const last = sh.getLastRow();
+  if (last >= 2 && sh.getRange(2, B.number + 1, last - 1, 1).getValues().some(r => String(r[0]) === number)) return { added: false };
+  const sent = Number(rec.sentAt);
+  const time = sent > 0 && sent <= Date.now() + 86400000 ? new Date(sent) : new Date();
+  const text = (v) => String(v == null ? '' : v).slice(0, 2000);
+  const row = [time, number, agent, text(rec.pointId), text(rec.point), text(rec.city), text(rec.address), text(rec.title),
+    text(rec.size), text(rec.urgency), text(rec.qty), text(rec.photos), text(rec.fileUrl), text(rec.folder)];
+  // Текст как текст: заявка не должна стать формулой в таблице
+  sh.getRange(last + 1, 2, 1, row.length - 1).setNumberFormat('@');
+  sh.getRange(last + 1, 1, 1, row.length).setValues([row]);
+  log_(agent, 'отправил заявку на баннер', rec.pointId, number + ' · ' + text(rec.point));
+  return { added: true };
+}
+
+function banners_(from) {
+  const sh = bannersSheet_();
+  const last = sh.getLastRow();
+  if (last < 2) return [];
+  return sh.getRange(2, 1, last - 1, BANNERS_HEADER.length).getValues()
+    .filter(r => r[B.time] instanceof Date && r[B.time].getTime() >= from)
+    .map(r => ({
+      time: r[B.time].toISOString(), number: String(r[B.number]), agent: String(r[B.agent]), pointId: String(r[B.pointId]),
+      point: String(r[B.point]), city: String(r[B.city]), address: String(r[B.address]), title: String(r[B.title]),
+      size: String(r[B.size]), urgency: String(r[B.urgency]), qty: String(r[B.qty]), photos: String(r[B.photos]),
+      fileUrl: String(r[B.fileUrl]), folder: String(r[B.folder]),
+    }))
+    .sort((a, b) => b.time.localeCompare(a.time));
+}
+
 /* ---------------- Листы и папки ---------------- */
 
 function pointsSheet_() {
@@ -1989,6 +2032,19 @@ function staffSheet_() {
     sh.getRange(1, 1, 1, STAFF_HEADER.length).setValues([STAFF_HEADER]).setFontWeight('bold').setBackground('#dbe7f5');
     sh.setFrozenRows(1);
     sh.setColumnWidth(S.name + 1, 220);
+  }
+  return sh;
+}
+
+function bannersSheet_() {
+  const ss = SpreadsheetApp.getActive();
+  let sh = ss.getSheetByName(BANNERS_SHEET);
+  if (!sh) {
+    sh = ss.insertSheet(BANNERS_SHEET);
+    sh.getRange(1, 1, 1, BANNERS_HEADER.length).setValues([BANNERS_HEADER]).setFontWeight('bold').setBackground('#dbe7f5');
+    sh.setFrozenRows(1);
+    sh.setColumnWidth(B.point + 1, 200);
+    sh.setColumnWidth(B.title + 1, 280);
   }
   return sh;
 }
