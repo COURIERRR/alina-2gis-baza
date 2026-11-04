@@ -73,7 +73,6 @@
   /* ---------- helpers ---------- */
   const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) =>
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-  const routeOf = (id) => Number(String(id).match(/^R(\d+)-/)[1]);
   const cleanAddr = (a) => String(a).replace(/\s*\d+\s*филиал\S*\s*$/i, '').trim();
   const telDigits = (s) => String(s || '').replace(/[^\d+]/g, '');
   function waUrl(s) {
@@ -257,6 +256,11 @@
       dayEnd: (geo) => post('dayEnd', { geo }).then((d) => d.day),
       me: (from, who) => post('me', { from, who }).then((d) => d.me),
       boot: (from) => post('boot', { from }),
+      point: (id) => get('point', { id }).then((d) => d.point),
+      zones: () => post('zones', {}).then((d) => d.zones),
+      zonesBuild: () => post('zonesBuild', {}).then((d) => d.zones),
+      zoneSet: (id, zone) => post('zoneSet', { id, zone }).then((d) => d.zones),
+      zonesEnable: (on) => post('zonesEnable', { on }).then((d) => d.zones),
       staff: () => post('staff', {}).then((d) => d.staff),
       staffReset: (name) => post('staffReset', { name }).then((d) => d.staff),
       staffBlock: (name, blocked) => post('staffBlock', { name, blocked }).then((d) => d.staff),
@@ -281,8 +285,9 @@
       const out = [];
       (await load()).routes.concat(addedRoute()).forEach((r) => r.points.forEach((p) => {
         const st = s[p.id] || {};
-        out.push(Object.assign({ route: r.route, lat: null, lon: null, acc: p.lat != null ? 'точно' : '' }, p,
-          { status: st.status || 'свободна', agent: st.agent || '', visits: st.visits || 0, lastVisit: fmtTime(st.last),
+        const zp = zonesDb().on && zonesDb().map[p.id];
+        out.push(Object.assign({ lat: null, lon: null, acc: p.lat != null ? 'точно' : '' }, p,
+          { route: zp ? zp.zone : r.route, origin: r.route, n: zp ? zp.n : p.n, status: st.status || 'свободна', agent: st.agent || '', visits: st.visits || 0, lastVisit: fmtTime(st.last),
             closedReason: st.closedReason || '', closedNote: st.closedNote || '', closedBy: st.closedBy || '', closedAt: fmtTime(st.closedAt) }));
       }));
       return out;
@@ -295,6 +300,20 @@
     const fail = (m, code) => { const e = new Error(m); e.server = true; e.code = code || ''; throw e; };
     const find = async (id) => (await all()).find((x) => x.id === id) || fail('Точка не найдена');
     const staffDb = () => store.get('mock:staff', []);
+    const zonesDb = () => store.get('mock:zones', { on: false, map: {} });
+    // В демо координат нет: положение точки на карте выводится из её id
+    const demoPos = (id) => {
+      let h = 7;
+      for (const c of String(id)) h = (h * 31 + c.charCodeAt(0)) % 100003;
+      return { lat: 43.17 + (h % 181) / 1000, lon: 76.78 + ((h * 7) % 241) / 1000 };
+    };
+    const zonesOut = async () => {
+      const z = zonesDb();
+      const pts = await all();
+      return { on: !!z.on, built: Object.keys(z.map).length > 0, titles: ['Север', 'Северо-восток', 'Юго-восток', 'Юг', 'Юго-запад', 'Запад'],
+        points: pts.map((p) => Object.assign({ id: p.id, name: p.name, address: p.address, origin: p.origin, acc: 'точно',
+          done: p.status === 'выполнена', closed: p.status === 'закрыта', zone: (z.map[p.id] || {}).zone || 0 }, demoPos(p.id))) };
+    };
     const findStaff = (name) => staffDb().find((s) => s.name.toLowerCase() === String(name).trim().toLowerCase());
     const session = (s) => wait({ ok: true, token: 'mock.' + encodeURIComponent(s.name) + '.' + (s.ver || 1), name: s.name, role: s.role });
     const dayDb = () => store.get('mock:day', {});
@@ -515,6 +534,35 @@
         t.status = 'отменено';
         log(me.agent, 'отменил задание', id, t.type + ' — ' + t.name);
       }),
+      point: async (id) => wait(await find(id)),
+      zones: async () => wait(await zonesOut()),
+      zonesBuild: async () => {
+        const map = {};
+        const cnt = {};
+        (await all()).forEach((p, i) => {
+          if (i % 150 === 149) return; // несколько точек без зоны — для проверки ручного выбора
+          const c = demoPos(p.id);
+          const a = (Math.atan2(c.lon - 76.9, c.lat - 43.26) + 2 * Math.PI) % (2 * Math.PI);
+          const zone = Math.floor(a / (Math.PI / 3)) + 1;
+          cnt[zone] = (cnt[zone] || 0) + 1;
+          map[p.id] = { zone, n: cnt[zone] };
+        });
+        store.set('mock:zones', { on: false, map });
+        return wait(await zonesOut());
+      },
+      zoneSet: async (id, zone) => {
+        const z = zonesDb();
+        z.map[id] = { zone: Number(zone), n: 999 };
+        store.set('mock:zones', z);
+        return wait(await zonesOut());
+      },
+      zonesEnable: async (on) => {
+        const z = zonesDb();
+        z.on = on;
+        store.set('mock:zones', z);
+        store.set('mock:zv', String(Date.now()));
+        return wait(await zonesOut());
+      },
       stats: async (from) => {
         const s = computeStats(from, visitsAll(), tasksDb(), logDb());
         const pts = await all();
@@ -594,7 +642,7 @@
       },
       boot: async (from) => ({
         routes: await api.summary(), tasks: await api.tasks(), me: await api.me(from, ''),
-        stats: isManager() ? await api.stats(from) : null,
+        stats: isManager() ? await api.stats(from) : null, zv: store.get('mock:zv', ''),
       }),
       staff: () => wait(staffDb().map((s) => ({ name: s.name, role: s.role, status: s.status, hasPin: !!s.pin, created: s.created, last: s.last }))),
       staffReset: (name) => { const db = staffDb(); db.find((x) => x.name === name).pin = ''; store.set('mock:staff', db); return api.staff(); },
@@ -714,7 +762,7 @@
     if (!authed) return;
     const h = location.hash.replace(/^#\/?/, '');
     const cur = h === 'add' ? 'add' : /^(tasks|td\/)/.test(h) ? 'tasks'
-      : /^(stats|staff|teammap|report|rv\/)/.test(h) || (/^me\/./.test(h) && isManager()) ? 'stats'
+      : /^(stats|staff|teammap|report|rv\/|zones)/.test(h) || (/^me\/./.test(h) && isManager()) ? 'stats'
       : /^(me|pin)/.test(h) ? 'me' : 'home';
     const c = cache.tasks ? taskCounts(cache.tasks) : null;
     const tabs = [['home', '#/', 'Сегодня', I.home], ['tasks', '#/tasks', 'Задания', I.tasks]]
@@ -755,6 +803,7 @@
     if (h === 'stats') return statsView();
     if (h === 'staff') return staffView();
     if (h === 'teammap') return teamMapView();
+    if (h === 'zones') return zonesView();
     return homeView();
   }
 
@@ -1057,6 +1106,11 @@
   // Маршруты, задания, свой день (и «Сегодня» команды у руководителя) — одним запросом вместо трёх
   function refreshAll() {
     return api.boot(periodStart('day')).then((d) => {
+      if ((d.zv || '') !== store.get('zv', '')) {
+        store.set('zv', d.zv || '');
+        for (let n = 1; n <= 12; n++) store.del('cache:points:' + n);
+        cache.points = {};
+      }
       d.routes.sort((a, b) => a.route - b.route);
       cache.summary = d.routes; saveCache('summary');
       cache.tasks = d.tasks; saveCache('tasks');
@@ -1487,23 +1541,30 @@
       ${values.indexOf(o) >= 0 ? 'checked' : ''}>${esc(o)}</label>`).join('') + '</div>';
   }
 
+  // Маршрут точки хранится в данных, а не в id: id не меняется, даже если точка попала в другую зону
+  function findCachedPoint(id) {
+    const routes = cache.summary ? cache.summary.map((r) => r.route) : [1, 2, 3, 4, 5, 6];
+    for (const n of routes) {
+      const p = (cachedPoints(n) || []).find((x) => x.id === id);
+      if (p) return p;
+    }
+    return null;
+  }
   async function loadPoint(id) {
-    const routeNo = routeOf(id);
-    let p = (cachedPoints(routeNo) || []).find((x) => x.id === id);
-    if (!p) p = (await loadPoints(routeNo)).find((x) => x.id === id);
-    if (!p) throw new Error('Точка не найдена');
-    return p;
+    return findCachedPoint(id) || api.point(id);
   }
 
   async function pointView(id) {
-    const routeNo = routeOf(id);
-    setBar('Маршрут ' + routeNo, '#/r/' + routeNo);
     const hash = location.hash;
-    let p = (cachedPoints(routeNo) || []).find((x) => x.id === id);
+    let p = findCachedPoint(id);
     if (!p) {
+      setBar('Точка', '#/');
       $app.innerHTML = '<div class="spinner">Загрузка…</div>';
       try { p = await loadPoint(id); } catch (e) { return showError(e, () => pointView(id)); }
+      if (location.hash !== hash) return;
     }
+    const routeNo = p.route;
+    setBar('Маршрут ' + routeNo, '#/r/' + routeNo);
     let photos = [];
     let editing = null; // значения анкеты, когда автор её редактирует
     let revisit = null; // новый визит на выполненную точку: контакты из прошлой анкеты
@@ -2157,6 +2218,7 @@
             <span class="ri-sub" style="display:block">Кто, где и что заполнил</span></span>${chev}</a>
           <a class="row-item has-icon" href="#/teammap"><span class="ri-icon" style="background:var(--ok)">${I.map}</span><span class="grow">Карта команды</span>${chev}</a>
           <a class="row-item has-icon" href="#/staff"><span class="ri-icon" style="background:#8e8e93">${I.users}</span><span class="grow">Сотрудники</span>${chev}</a>
+          <a class="row-item has-icon" href="#/zones"><span class="ri-icon" style="background:var(--accent-2)">${I.pin}</span><span class="grow">Маршруты по районам</span>${chev}</a>
           <a class="row-item has-icon" href="#/tasks" id="allTasks"><span class="ri-icon">${I.tasks}</span><span class="grow">Все задания команды</span>${chev}</a>
         </div>
         <div class="section-title">За период</div>
@@ -2641,6 +2703,103 @@
       L.circleMarker([ui.pos.lat, ui.pos.lon], { radius: 8, color: '#fff', weight: 3, fillColor: '#c0352b', fillOpacity: 1 }).bindTooltip('Я').addTo(map);
       map.setView([ui.pos.lat, ui.pos.lon], 14);
     });
+  }
+
+  /* ---------- Маршруты по районам: черновик и включение (руководитель) ---------- */
+  const ZONE_COLORS = ['#2a3b7e', '#ff9500', '#34c759', '#af52de', '#ff3b30', '#489ed7'];
+
+  async function zonesView() {
+    if (!isManager()) { location.hash = '#/'; return; }
+    setBar('Маршруты по районам', '#/stats');
+    const hash = location.hash;
+    $app.innerHTML = '<div class="spinner">Загрузка…</div>';
+    let z;
+    try {
+      await loadLeaflet();
+      z = await api.zones();
+    } catch (e) { return showError(e, zonesView); }
+    if (location.hash !== hash) return;
+
+    const run = async (btn, label, fn, okMsg) => {
+      btn.disabled = true;
+      btn.textContent = label;
+      try {
+        z = await fn();
+        if (okMsg) toast(okMsg);
+        render();
+      } catch (e) {
+        toast(e.server ? e.message : 'Нет связи', true);
+        render();
+      }
+    };
+
+    function render() {
+      if (location.hash !== hash) return;
+      if (!z.built) {
+        $app.innerHTML = `<div class="card">
+            <h3>${I.pin} Как это работает</h3>
+            <p class="muted" style="margin:0 0 12px">Точки делятся на 6 маршрутов по районам. Анкеты, фото, задания и статусы остаются на месте. Сначала получится черновик: агенты его не увидят, пока вы не включите.</p>
+            <button class="btn primary" id="zBuild">Рассчитать черновик</button>
+          </div>`;
+        $('zBuild').onclick = (ev) => run(ev.target, 'Считаем, это до минуты…', () => api.zonesBuild());
+        return;
+      }
+      const none = z.points.filter((p) => !p.zone);
+      const zones = z.titles.map((title, i) => {
+        const m = z.points.filter((p) => p.zone === i + 1);
+        return { no: i + 1, title, color: ZONE_COLORS[i], m, done: m.filter((p) => p.done).length, closed: m.filter((p) => p.closed).length,
+          rough: m.filter((p) => p.acc !== 'точно').length };
+      });
+      const shown = z.points.filter((p) => p.lat != null && p.zone);
+      $app.innerHTML = `
+        <div class="status-box ${z.on ? 'done' : 'work'}">${z.on ? 'Новые маршруты включены: агенты видят районы' : 'Это черновик: агенты пока видят старые маршруты'}</div>
+        <div class="map" id="map" style="height:50vh;min-height:280px"></div>
+        <div class="list">${zones.map((q) => `<details class="zone-row">
+          <summary class="row-item"><i class="zone-dot" style="background:${q.color}"></i>
+            <span class="grow"><span class="ri-title">Маршрут ${q.no}</span>
+              <span class="ri-sub" style="display:block">${esc(q.title)}</span>
+              <span class="ri-sub" style="display:block">выполнено ${q.done}${q.closed ? ' · нерабочих ' + q.closed : ''}${q.rough ? ' · примерных адресов ' + q.rough : ''}</span></span>
+            <span class="ri-side">${q.m.length}</span></summary>
+          <div class="zone-points">${q.m.map((p) => `<div>${esc(p.name)}<span class="muted"> · ${esc(cleanAddr(p.address))}</span></div>`).join('')}</div>
+        </details>`).join('')}</div>
+        ${none.length ? `<div class="section-title">Без маршрута: ${none.length}</div>
+          <p class="muted" style="margin:0 16px 8px;font-size:13px">Адрес не удалось определить. Выберите маршрут вручную. Если не выбрать, точка останется в маршруте со своим старым номером.</p>
+          <div class="card">${none.map((p) => `<div class="field">
+            <label>${esc(p.name)} · ${esc(cleanAddr(p.address))}</label>
+            <select data-zone="${esc(p.id)}"><option value="">Выбрать маршрут</option>
+              ${z.titles.map((t, i) => `<option value="${i + 1}">Маршрут ${i + 1}: ${esc(t)}</option>`).join('')}</select></div>`).join('')}</div>` : ''}
+        <button class="btn ${z.on ? 'danger' : 'primary'}" id="zToggle" style="margin-bottom:8px">${z.on ? 'Вернуть старые маршруты' : 'Включить новые маршруты'}</button>
+        ${z.on ? '' : '<button class="btn ghost" id="zBuild">Пересчитать черновик</button>'}`;
+
+      const map = newMap();
+      const marks = shown.map((p) => L.circleMarker([p.lat, p.lon], { radius: 6, color: '#fff', weight: 1, fillColor: ZONE_COLORS[p.zone - 1], fillOpacity: p.done ? 0.5 : 0.95 })
+        .bindPopup(`<b>${esc(p.name)}</b><br>${esc(cleanAddr(p.address))}<br>Маршрут ${p.zone} (был ${p.origin})${p.acc === 'точно' ? '' : '<br>Адрес примерный'}`).addTo(map));
+      if (marks.length) map.fitBounds(L.featureGroup(marks).getBounds().pad(0.05)); else map.setView(ALMATY, 11);
+
+      $app.querySelectorAll('[data-zone]').forEach((s) => {
+        s.onchange = async () => {
+          if (!s.value) return;
+          s.disabled = true;
+          try { z = await api.zoneSet(s.dataset.zone, Number(s.value)); toast('Маршрут назначен'); render(); }
+          catch (e) { toast(e.server ? e.message : 'Нет связи', true); s.disabled = false; }
+        };
+      });
+      if ($('zBuild')) $('zBuild').onclick = (ev) => {
+        if (confirm('Пересчитать черновик? Выбранные вручную маршруты сбросятся. Данные точек не изменятся.')) run(ev.target, 'Считаем, это до минуты…', () => api.zonesBuild());
+      };
+      $('zToggle').onclick = (ev) => {
+        const q = z.on ? 'Вернуть старые маршруты? Анкеты и статусы не изменятся.'
+          : 'Включить новые маршруты для всей команды? Анкеты, фото, задания и статусы останутся на месте, а вернуть старые можно в любой момент.';
+        if (!confirm(q)) return;
+        const on = !z.on;
+        run(ev.target, 'Переключаем…', async () => {
+          const nz = await api.zonesEnable(on);
+          await refreshAll().catch(() => {});
+          return nz;
+        }, on ? 'Новые маршруты включены' : 'Старые маршруты возвращены');
+      };
+    }
+    render();
   }
 
   async function teamMapView() {
