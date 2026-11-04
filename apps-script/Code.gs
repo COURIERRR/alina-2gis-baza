@@ -136,6 +136,9 @@ function onOpen() {
     .addItem('Код руководителя…', 'menuManagerCode')
     .addSeparator()
     .addItem('Рассчитать новые маршруты (черновик)', 'menuZonesBuild')
+    .addItem('Назначить маршруты точкам…', 'menuZonesAssign')
+    .addItem('Включить новые маршруты', 'menuZonesOn')
+    .addItem('Вернуть старые маршруты', 'menuZonesOff')
     .addItem('Адрес для ежедневного отчёта…', 'menuReportTo')
     .addToUi();
 }
@@ -169,6 +172,26 @@ function menuZonesBuild() {
   const lines = z.titles.map((title, i) => 'Маршрут ' + (i + 1) + ' (' + title + '): ' + z.points.filter(p => p.zone === i + 1).length);
   SpreadsheetApp.getUi().alert('Черновик рассчитан. В приложении ничего не изменилось.\n\n' + lines.join('\n') +
     '\nБез зоны: ' + z.points.filter(p => !p.zone).length);
+}
+
+/** Ввод вида «R1-089=3, R2-052=5»: маршруты точкам, которые не определились автоматически. */
+function menuZonesAssign() {
+  const ui = SpreadsheetApp.getUi();
+  const res = ui.prompt('Назначить маршруты точкам', 'Точки и маршруты через запятую, например: R1-089=3, R2-052=5', ui.ButtonSet.OK_CANCEL);
+  if (res.getSelectedButton() !== ui.Button.OK) return;
+  const n = withLock_(() => zonesAssign_('Таблица', res.getResponseText()));
+  ui.alert('Назначено точек: ' + n + '. Без маршрута осталось: ' + zonesPreview_().points.filter(p => !p.zone).length);
+}
+
+function menuZonesOn() { menuZonesSwitch_(true); }
+function menuZonesOff() { menuZonesSwitch_(false); }
+function menuZonesSwitch_(on) {
+  const ui = SpreadsheetApp.getUi();
+  const q = on ? 'Включить новые маршруты для всей команды? Анкеты, фото, задания и статусы останутся на месте.'
+    : 'Вернуть старые маршруты? Анкеты, фото, задания и статусы останутся на месте.';
+  if (ui.alert(q, ui.ButtonSet.YES_NO) !== ui.Button.YES) return;
+  const z = withLock_(() => zonesEnable_('Таблица', on));
+  ui.alert((on ? 'Новые маршруты включены.' : 'Старые маршруты возвращены.') + '\nБез маршрута: ' + z.points.filter(p => !p.zone).length);
 }
 
 /** Код входа руководителя хранится только здесь (Script Properties), не в репозитории. */
@@ -1811,6 +1834,19 @@ function nearestZone_(lat, lon) {
   let best = 0, bd = Infinity;
   centers.forEach((c, i) => { const d = dist2_(zoneXY_(c), me); if (d < bd) { bd = d; best = i + 1; } });
   return best;
+}
+
+/** Разбирает «R1-089=3, R2-052=5». Сначала проверяет весь список: при ошибке не меняется ничего. */
+function zonesAssign_(agent, text) {
+  const pairs = String(text || '').split(/[,;\n]+/).map(s => s.trim()).filter(Boolean).map(s => {
+    const m = s.match(/^(R\d+-\d+)\s*=\s*(\d+)$/);
+    if (!m) fail_('Не понял запись: ' + s);
+    if (!(Number(m[2]) >= 1 && Number(m[2]) <= ZONES)) fail_('Маршрут — от 1 до ' + ZONES + ': ' + s);
+    findRow_(m[1]);
+    return { id: m[1], zone: Number(m[2]) };
+  });
+  pairs.forEach(p => zoneSet_(agent, p.id, p.zone));
+  return pairs.length;
 }
 
 function zoneSet_(agent, id, zone) {
