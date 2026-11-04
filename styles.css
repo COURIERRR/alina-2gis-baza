@@ -289,6 +289,23 @@ form fieldset { border: 0; padding: 0; margin: 0; }
 .chips label:has(input:checked) { background: var(--accent); color: var(--accent-ink); }
 .req { color: var(--bad); }
 
+/* Разделы анкеты: сворачиваются, чтобы не листать все поля */
+.sect { border-top: 1px solid var(--line); margin: 0 -16px; padding: 0 16px; }
+.sect:last-of-type { border-bottom: 1px solid var(--line); margin-bottom: 16px; }
+.sect + .field { margin-top: 16px; }
+.sect summary { display: flex; justify-content: space-between; align-items: center; padding: 13px 0; font-size: 17px; font-weight: 600; list-style: none; cursor: pointer; }
+.sect summary::-webkit-details-marker { display: none; }
+.sect summary::after { content: '›'; color: var(--muted); font-size: 22px; line-height: 1; transition: transform .15s; }
+.sect[open] summary::after { transform: rotate(90deg); }
+.num-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.num { display: block; font-size: 13px; color: var(--muted); min-width: 0; }
+.field .num input, .field .num textarea { display: block; margin-top: 3px; color: var(--ink); }
+.field .num textarea { min-height: 64px; }
+.sub-label { font-size: 13px; font-weight: 600; margin: 12px 4px 6px; }
+.sum { font-size: 13px; color: var(--ok-ink); margin: 6px 4px 0; }
+.sum:empty { display: none; }
+.sum.warn { color: var(--warn); }
+
 /* Выбор заданий: строка с круглой галочкой, под ней комментарий */
 .task-pick { border-radius: 12px; margin-bottom: 8px; background: var(--field); overflow: hidden; transition: box-shadow .15s; }
 .task-pick > label { display: flex; gap: 12px; align-items: center; padding: 13px 14px; font-weight: 500; }

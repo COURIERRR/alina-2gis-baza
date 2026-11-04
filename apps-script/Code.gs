@@ -37,12 +37,56 @@ const RESULT_FIELDS = [
   ['contact', 'Контактное лицо'], ['position', 'Должность'],
   ['phone', 'Телефон'], ['whatsapp', 'WhatsApp'], ['instagram', 'Instagram / сайт'],
   ['assortment', 'Ассортимент'], ['competitors', 'Бренды конкурентов'],
-  ['supplier', 'Поставщик'], ['alina', 'Работают с Alina'], ['ourBrands', 'Наши бренды в точке'],
+  ['supplier', 'Поставщик'], ['alina', 'Работаем / Не работаем'], ['ourBrands', 'Наши бренды в точке'],
   ['interest', 'Интерес'], ['nextStep', 'Итог / следующий шаг'], ['nextDate', 'Дата след. шага'],
   ['comment', 'Комментарий'], ['photos', 'Фото'],
   ['visit', 'Визит №'], ['gps', 'GPS агента'], ['distance', 'До точки, м'],
   ['id', 'id'], ['uid', 'uid'],
-];
+].concat(extraFields_());
+
+const RENAMED_COLUMNS = { 'Работают с Alina': 'Работаем / Не работаем' };
+
+// Поля шаблона оценки ТТ. Ключи совпадают с именами полей анкеты в app.js
+function extraFields_() {
+  const EQUIP = ['FAWORI', 'Alina Paint', 'AlinEX', 'V-tech'];
+  const KO = ['Alina', 'FAWORI', 'Радуга', 'Dulux', 'Tikkurila', 'Собственное', 'Другие'];
+  const BRANDING = ['FAWORI', 'Alina Paint', 'V-tech', 'AlinEX', 'НАШИ'];
+  const PAINT = ['Dulux', 'Tikkurila', 'Marshall', 'Raduga', 'Belly Dom', 'Decorex', 'Fawori', 'Alina', 'Другие'];
+  const SSS = ['AlinEX', 'НАШИ', 'Волма', 'Другие'];
+  const SEAL = ['V-tech', 'Tytan', 'VGT', 'Другие'];
+  const nums = (prefix, title, names) => names.map(n => [prefix + ':' + n, title + ': ' + n, 'num']);
+  return [].concat(
+    [['score', 'Баллы ТТ', 'num'], ['manager', 'АК Alina Group'], ['format', 'Формат ТТ'],
+      ['formatDesc', 'Описание формата'], ['payment', 'Условия оплаты'],
+      ['traffic', 'Проходимость и расположение'], ['ready', 'Готовность работать с Alina Group'],
+      ['areaHall', 'Торговый зал, м2', 'num'], ['areaStock', 'Склад, м2', 'num']],
+    nums('shelf', 'Полки, шт', EQUIP), nums('end', 'Торцы, шт', EQUIP), nums('ko', 'КО, шт', KO),
+    BRANDING.map(n => ['brand:' + n, 'Брендинг: ' + n]),
+    nums('fVdk', 'Фейсы ВДК', PAINT), nums('fAlk', 'Фейсы алкиды', PAINT),
+    nums('pSss', 'Паллеты ССС', SSS), nums('fGrout', 'Фейсы затирки', SSS),
+    nums('fSeal', 'Фейсы герметики', SEAL), nums('fFoam', 'Фейсы пены', SEAL),
+    [['sPaint', 'Продажи за год: краски, тенге', 'num'], ['shareVdk', 'Краски: доля ВДК, %', 'num'],
+      ['shareAlk', 'Краски: доля алкидов, %', 'num']],
+    nums('dVdk', 'Доля в ВДК, %', PAINT), nums('dAlk', 'Доля в алкидах, %', PAINT),
+    [['sSss', 'Продажи за год: ССС, тенге', 'num'], ['shareSss', 'ССС: доля без затирок, %', 'num'],
+      ['shareGrout', 'ССС: доля затирок, %', 'num']],
+    nums('dSss', 'Доля в ССС, %', SSS), nums('dGrout', 'Доля в затирках, %', SSS),
+    [['sSeal', 'Продажи за год: герметики и пены, тенге', 'num'], ['shareSeal', 'Доля герметиков, %', 'num'],
+      ['shareFoam', 'Доля пен, %', 'num']],
+    nums('dSeal', 'Доля в герметиках, %', SEAL), nums('dFoam', 'Доля в пенах, %', SEAL),
+    [['masterClasses', 'Мастер-классов ОТЭК за год', 'num'], ['billboardCount', 'Билборды: кол-во', 'num'],
+      ['billboardAddr', 'Билборды: адрес'], ['billboardContact', 'Билборды: контакт']]
+  );
+}
+
+// Шкалы баллов из шаблона оценки ТТ (лист DATA): [нижняя граница, баллы]
+const SCORE_SALES_LKP = [[30e6, 7], [50e6, 12], [100e6, 25], [300e6, 76], [500e6, 127]];
+const SCORE_SALES_SSS = [[30e6, 11], [50e6, 19], [100e6, 38], [300e6, 116], [500e6, 193]];
+const SCORE_SALES_SEAL = [[30e6, 2], [50e6, 4], [100e6, 9], [300e6, 27], [500e6, 45]];
+const SCORE_ASSORTMENT = [[50, 6], [100, 12], [300, 38], [500, 64], [1000, 128]];
+const SCORE_AREA = [[100, 1], [500, 7], [1000, 15], [3000, 46], [5000, 78]];
+const SCORE_TRAFFIC = { 'Слабая': 1, 'Средняя': 7, 'Высокая': 11 };
+const SCORE_READY = { 'Да': 10 };
 
 // Колонки листа «Задания»
 const T = {
@@ -459,11 +503,9 @@ function complete_(id, agent, form, photos) {
     agent: agent, time: fmt_(now), photos: photoLinks.join('\n'), id: row[P.id],
     visit: visit, gps: geo.gps, distance: geo.distance, uid: form.uid || '',
   });
-  joinLists_(rec);
 
   const rs = resultSheet_(route);
-  const values = RESULT_FIELDS.map(f => rec[f[0]] == null ? '' : String(rec[f[0]]));
-  rs.getRange(rs.getLastRow() + 1, 1, 1, values.length).setNumberFormat('@').setValues([values]);
+  writeResult_(rs.getRange(rs.getLastRow() + 1, 1, 1, RESULT_FIELDS.length), rec);
 
   const claimed = status === ST_DONE ? row[P.claimed] : (row[P.claimed] || now);
   sh.getRange(rowIndex, P.status + 1, 1, 4).setValues([[ST_DONE, agent, claimed, status === ST_DONE ? row[P.done] : now]]);
@@ -500,9 +542,32 @@ function meters_(lat1, lon1, lat2, lon2) {
   return 2 * 6371000 * Math.asin(Math.sqrt(x));
 }
 
-const LIST_FIELDS = ['assortment', 'competitors', 'ourBrands'];
-function joinLists_(rec) {
-  LIST_FIELDS.forEach(k => { if (Array.isArray(rec[k])) rec[k] = rec[k].join(', '); });
+/** Числа пишутся числами (агент может ввести «40 000 000» или «12,5»), остальное — текстом. */
+function toNum_(v) {
+  const s = String(v == null ? '' : v).replace(/\s/g, '').replace(',', '.');
+  if (s === '') return '';
+  const n = Number(s);
+  return isNaN(n) ? String(v) : n;
+}
+
+function writeResult_(range, rec) {
+  Object.keys(rec).forEach(k => { if (Array.isArray(rec[k])) rec[k] = rec[k].join(', '); });
+  rec.score = score_(rec);
+  const isNum = f => f[2] === 'num';
+  range.setNumberFormats([RESULT_FIELDS.map(f => isNum(f) ? 'General' : '@')]);
+  range.setValues([RESULT_FIELDS.map(f => isNum(f) ? toNum_(rec[f[0]]) : (rec[f[0]] == null ? '' : String(rec[f[0]])))]);
+}
+
+/** Сумма баллов по шаблону оценки ТТ; пусто, если данных для оценки в анкете нет. */
+function score_(rec) {
+  const num = k => { const n = toNum_(rec[k]); return typeof n === 'number' ? n : 0; };
+  const band = (v, table) => table.reduce((p, t) => (v >= t[0] ? t[1] : p), 0);
+  const faces = RESULT_FIELDS.filter(f => /^(fVdk|fAlk|pSss|fGrout|fSeal|fFoam):/.test(f[0]))
+    .reduce((sum, f) => sum + num(f[0]), 0);
+  const area = num('areaHall') + num('areaStock');
+  if (!faces && !area && !num('sPaint') && !num('sSss') && !num('sSeal') && !rec.traffic && !rec.ready) return '';
+  return band(num('sPaint'), SCORE_SALES_LKP) + band(num('sSss'), SCORE_SALES_SSS) + band(num('sSeal'), SCORE_SALES_SEAL) +
+    band(faces, SCORE_ASSORTMENT) + band(area, SCORE_AREA) + (SCORE_TRAFFIC[rec.traffic] || 0) + (SCORE_READY[rec.ready] || 0);
 }
 
 function resultRows_(id) {
@@ -567,9 +632,7 @@ function update_(id, agent, form, photos) {
     visit: old.visit, gps: old.gps, distance: old.distance, uid: old.uid,
     photos: [old.photos].concat(added).filter(Boolean).join('\n'),
   });
-  joinLists_(rec);
-  const values = RESULT_FIELDS.map(f => rec[f[0]] == null ? '' : String(rec[f[0]]));
-  res.rs.getRange(res.rowIndex, 1, 1, values.length).setNumberFormat('@').setValues([values]);
+  writeResult_(res.rs.getRange(res.rowIndex, 1, 1, RESULT_FIELDS.length), rec);
   log_(agent, 'изменил анкету', id, point.row[P.name]);
   return { point: toPoint_(point.row), photos: added.length };
 }
@@ -1166,6 +1229,7 @@ function resultSheet_(route) {
   let sh = ss.getSheetByName(name);
   if (!sh) {
     sh = ss.insertSheet(name);
+    growColumns_(sh);
     sh.getRange(1, 1, 1, RESULT_FIELDS.length).setValues([RESULT_FIELDS.map(f => f[1])])
       .setFontWeight('bold').setBackground('#dbe7f5');
     sh.setFrozenRows(1);
@@ -1184,21 +1248,32 @@ function ensureResultColumns_(sh) {
   cache_().put(flag, '1', 21600);
 }
 
+function growColumns_(sh) {
+  const max = sh.getMaxColumns();
+  if (max < RESULT_FIELDS.length) sh.insertColumnsAfter(max, RESULT_FIELDS.length - max);
+}
+
 function ensureResultColumnsNow_(sh) {
   const width = Math.max(sh.getLastColumn(), 1);
   const header = sh.getRange(1, 1, 1, width).getValues()[0].map(String);
+  growColumns_(sh);
+  header.forEach((h, i) => {
+    if (!RENAMED_COLUMNS[h]) return;
+    header[i] = RENAMED_COLUMNS[h];
+    sh.getRange(1, i + 1).setValue(header[i]);
+  });
   RESULT_FIELDS.forEach((f, i) => {
-    if (header[i] === f[1]) return;
-    if (header.indexOf(f[1]) >= 0) return;
-    if (i >= header.length) {
-      // Колонка в конце: добавить место на листе, если его нет
-      if (sh.getMaxColumns() < i + 1) sh.insertColumnsAfter(sh.getMaxColumns(), i + 1 - sh.getMaxColumns());
-    } else {
-      sh.insertColumnBefore(i + 1);
-    }
+    if (i >= header.length || header[i] === f[1] || header.indexOf(f[1]) >= 0) return;
+    sh.insertColumnBefore(i + 1);
     sh.getRange(1, i + 1).setValue(f[1]).setFontWeight('bold').setBackground('#dbe7f5');
     header.splice(i, 0, f[1]);
   });
+  // Колонки в конце добавляются одним запросом — их может быть больше сотни
+  const tail = RESULT_FIELDS.slice(header.length).map(f => f[1]);
+  if (tail.length) {
+    sh.getRange(1, header.length + 1, 1, tail.length).setValues([tail])
+      .setFontWeight('bold').setBackground('#dbe7f5');
+  }
 }
 
 function subFolder_(parent, name) {

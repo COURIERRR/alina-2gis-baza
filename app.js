@@ -9,7 +9,23 @@
   const COMPETITORS = ['Tikkurila', 'Dulux', 'Alpina', 'Caparol', 'Ceresit', 'Knauf', 'Текс',
     'VGT', 'Лакра', 'Eskaro', 'Marshall', 'Местные / Китай'];
   const OUR_BRANDS = ['AlinEX', 'НАШИ', 'Norma', 'Alina Paint', 'Алкиды', 'FAWORI', 'V-tech'];
-  const ALINA = ['Да, работают', 'Раньше работали', 'Нет'];
+  const ALINA = ['Работаем', 'Не работаем'];
+  const OLD_ALINA = { 'Да, работают': 'Работаем', 'Нет': 'Не работаем' }; // ответы старых анкет
+
+  // Поля шаблона оценки ТТ. Те же ключи — в extraFields_() в apps-script/Code.gs
+  const TT_FORMATS = ['Строительный магазин', 'Хозяйственный магазин', 'Универсальный магазин', 'Специализированный магазин ЛКМ',
+    'Магазин инструментов', 'Магазин сантехники', 'Строительная база', 'Торговая сеть', 'Другое', 'Не формат'];
+  const PAYMENT = ['Предоплата', 'Пост оплата до 7 дней', 'Пост оплата до 15 дней', 'Пост оплата до 30 дней',
+    'Пост оплата более 30 дней', 'В реализацию'];
+  const TRAFFIC = ['Слабая', 'Средняя', 'Высокая'];
+  const READY = ['Да', 'Нет'];
+  const EQUIP_BRANDS = ['FAWORI', 'Alina Paint', 'AlinEX', 'V-tech'];
+  const KO_BRANDS = ['Alina', 'FAWORI', 'Радуга', 'Dulux', 'Tikkurila', 'Собственное', 'Другие'];
+  const BRANDING_BRANDS = ['FAWORI', 'Alina Paint', 'V-tech', 'AlinEX', 'НАШИ'];
+  const BRANDING_KINDS = ['Снаружи', 'Внутри', 'Торговое оборудование', 'POSM'];
+  const PAINT_BRANDS = ['Dulux', 'Tikkurila', 'Marshall', 'Raduga', 'Belly Dom', 'Decorex', 'Fawori', 'Alina', 'Другие'];
+  const SSS_BRANDS = ['AlinEX', 'НАШИ', 'Волма', 'Другие'];
+  const SEAL_BRANDS = ['V-tech', 'Tytan', 'VGT', 'Другие'];
   const INTEREST = ['Высокий', 'Средний', 'Низкий', 'Отказ'];
   const TASK_TYPES = [
     'Отработать с командой ОТЭК',
@@ -339,7 +355,7 @@
         const r = lastResult(id);
         if (!r) return wait(null);
         const out = Object.assign({}, r.form, { photos: Array(r.photos).fill('photo').join('\n') });
-        ['assortment', 'competitors', 'ourBrands'].forEach((k) => { if (Array.isArray(out[k])) out[k] = out[k].join(', '); });
+        Object.keys(out).forEach((k) => { if (Array.isArray(out[k])) out[k] = out[k].join(', '); });
         return wait(out);
       },
       history: async (id) => wait(results().filter((x) => x.id === id).map((r, i) => ({
@@ -1168,6 +1184,7 @@
     let photos = [];
     let editing = null; // значения анкеты, когда автор её редактирует
     let revisit = null; // новый визит на выполненную точку: контакты из прошлой анкеты
+    const openSects = new Set(['assort']);
     let history = null; // визиты точки, когда история открыта
     let ptasks = cache.tasks ? cache.tasks.filter((t) => t.point === id) : null; // сразу из сохранённых, потом обновятся
     renderPoint();
@@ -1232,6 +1249,17 @@
       const known = { phone: p.phone || '', whatsapp: p.whatsapp || '' };
       const d = (k) => esc(src[k] != null ? src[k] : (known[k] || ''));
       const formTitle = editing ? 'Изменение анкеты' : revisit ? 'Новый визит' : 'Анкета точки';
+      const sect = (key, title, body) => `<details class="sect" data-s="${key}"${openSects.has(key) ? ' open' : ''}>
+        <summary>${esc(title)}</summary>${body}</details>`;
+      const num = (key, label, group) => `<label class="num">${esc(label)}<input type="text" inputmode="decimal"
+        name="${esc(key)}"${group ? ` data-g="${group}"` : ''} value="${d(key)}"></label>`;
+      const nums = (prefix, names, group) => `<div class="num-grid">${names.map((n) => num(prefix + ':' + n, n, group)).join('')}</div>`;
+      const sum = (group) => `<div class="sum" data-sum="${group}"></div>`;
+      const salesBlock = (title, totalKey, parts, brands) => `<div class="field"><span class="label">${esc(title)}</span>
+        <div class="num-grid">${num(totalKey, 'Всего, тенге')}</div>
+        <div class="sub-label">Доля в продажах, %</div>
+        <div class="num-grid">${parts.map((x) => num(x[0], x[1], totalKey)).join('')}</div>${sum(totalKey)}
+        ${brands.map((x) => `<div class="sub-label">${esc(x[1])}: доли брендов, %</div>${nums(x[0], x[2], x[0])}${sum(x[0])}`).join('')}</div>`;
       // Быстрые действия, как в «Контактах» iPhone: маршрут, звонок, WhatsApp, карточка 2ГИС
       const quick = [
         `<button class="qa main" id="go">${I.car}<span>Маршрут</span></button>`,
@@ -1269,13 +1297,46 @@
           <div class="field"><label>Телефон</label><input type="tel" name="phone" placeholder="+7" value="${d('phone')}"></div>
           <div class="field"><label>WhatsApp</label><input type="tel" name="whatsapp" placeholder="если отличается" value="${d('whatsapp')}"></div>
           <div class="field"><label>Instagram / сайт</label><input type="text" name="instagram" autocapitalize="off" value="${d('instagram')}"></div>
-          <div class="field"><span class="label">Ассортимент</span>${chips('assortment', ASSORTMENT, 'checkbox', src.assortment || [])}
-            <input type="text" name="assortmentOther" placeholder="Другое" style="margin-top:8px" value="${d('assortmentOther')}"></div>
-          <div class="field"><span class="label">Бренды конкурентов на полке</span>${chips('competitors', COMPETITORS, 'checkbox', src.competitors || [])}
-            <input type="text" name="competitorsOther" placeholder="Другие бренды" style="margin-top:8px" value="${d('competitorsOther')}"></div>
-          <div class="field"><label>Поставщик (у кого закупаются)</label><input type="text" name="supplier" value="${d('supplier')}"></div>
-          <div class="field"><span class="label">Работают с Alina?</span>${chips('alina', ALINA, 'radio', [src.alina])}</div>
-          <div class="field"><span class="label">Наши бренды в точке</span>${chips('ourBrands', OUR_BRANDS, 'checkbox', src.ourBrands || [])}</div>
+          <div class="field"><span class="label">Работаем / Не работаем?</span>${chips('alina', ALINA, 'radio', [src.alina])}</div>
+          ${sect('place', 'Точка, помещение и склад', `
+            <div class="field"><label>АК Alina Group</label><input type="text" name="manager" value="${d('manager')}"></div>
+            <div class="field"><span class="label">Формат торговой точки</span>${chips('format', TT_FORMATS, 'radio', [src.format])}
+              <input type="text" name="formatDesc" placeholder="Описание, если «Другое»" style="margin-top:8px" value="${d('formatDesc')}"></div>
+            <div class="field"><span class="label">Площадь, м²</span><div class="num-grid">${num('areaHall', 'Торговый зал')}${num('areaStock', 'Склад')}</div></div>
+            <div class="field"><span class="label">Текущие условия оплаты</span>${chips('payment', PAYMENT, 'radio', [src.payment])}</div>
+            <div class="field"><span class="label">Проходимость и расположение</span>${chips('traffic', TRAFFIC, 'radio', [src.traffic])}</div>
+            <div class="field"><span class="label">Готовность работать с Alina Group по всем категориям</span>${chips('ready', READY, 'radio', [src.ready])}</div>`)}
+          ${sect('assort', 'Ассортимент и бренды', `
+            <div class="field"><span class="label">Ассортимент</span>${chips('assortment', ASSORTMENT, 'checkbox', src.assortment || [])}
+              <input type="text" name="assortmentOther" placeholder="Другое" style="margin-top:8px" value="${d('assortmentOther')}"></div>
+            <div class="field"><span class="label">Бренды конкурентов на полке</span>${chips('competitors', COMPETITORS, 'checkbox', src.competitors || [])}
+              <input type="text" name="competitorsOther" placeholder="Другие бренды" style="margin-top:8px" value="${d('competitorsOther')}"></div>
+            <div class="field"><span class="label">Наши бренды в точке</span>${chips('ourBrands', OUR_BRANDS, 'checkbox', src.ourBrands || [])}</div>
+            <div class="field"><label>Поставщик (у кого закупаются)</label><input type="text" name="supplier" value="${d('supplier')}"></div>`)}
+          ${sect('equip', 'Оборудование в точке', `
+            ${EQUIP_BRANDS.map((b) => `<div class="field"><span class="label">${esc(b)}</span>
+              <div class="num-grid">${num('shelf:' + b, 'Полки, шт')}${num('end:' + b, 'Торцы, шт')}</div></div>`).join('')}
+            <div class="field"><span class="label">Колеровочное оборудование (КО), шт</span>${nums('ko', KO_BRANDS)}</div>`)}
+          ${sect('branding', 'Брендинг', BRANDING_BRANDS.map((b) => `<div class="field"><span class="label">${esc(b)}</span>
+            ${chips('brand:' + b, BRANDING_KINDS, 'checkbox', src['brand:' + b] || [])}</div>`).join(''))}
+          ${sect('shelf', 'Полка и склад: фейсы и паллеты', `
+            <div class="field"><span class="label">Краски ВДК, фейсов на полке</span>${nums('fVdk', PAINT_BRANDS)}</div>
+            <div class="field"><span class="label">Алкиды, фейсов на полке</span>${nums('fAlk', PAINT_BRANDS)}</div>
+            <div class="field"><span class="label">ССС без затирок, паллет на складе</span>${nums('pSss', SSS_BRANDS)}</div>
+            <div class="field"><span class="label">Затирки, фейсов на полке</span>${nums('fGrout', SSS_BRANDS)}</div>
+            <div class="field"><span class="label">Герметики, фейсов на полке</span>${nums('fSeal', SEAL_BRANDS)}</div>
+            <div class="field"><span class="label">Пены, фейсов на полке</span>${nums('fFoam', SEAL_BRANDS)}</div>`)}
+          ${sect('sales', 'Объёмы продаж за последний год', `
+            ${salesBlock('Краски', 'sPaint', [['shareVdk', 'ВДК'], ['shareAlk', 'Алкиды']], [['dVdk', 'ВДК', PAINT_BRANDS], ['dAlk', 'Алкиды', PAINT_BRANDS]])}
+            ${salesBlock('ССС', 'sSss', [['shareSss', 'ССС без затирок'], ['shareGrout', 'Затирки']], [['dSss', 'ССС без затирок', SSS_BRANDS], ['dGrout', 'Затирки', SSS_BRANDS]])}
+            ${salesBlock('Герметики и пены', 'sSeal', [['shareSeal', 'Герметики'], ['shareFoam', 'Пены']], [['dSeal', 'Герметики', SEAL_BRANDS], ['dFoam', 'Пены', SEAL_BRANDS]])}`)}
+          ${sect('extra', 'Билборды и мастер-классы', `
+            <div class="field"><span class="label">Билборды рядом с точкой под аренду</span>
+              <div class="num-grid">${num('billboardCount', 'Количество')}</div>
+              <label class="num" style="margin-top:8px">Адрес<textarea name="billboardAddr">${d('billboardAddr')}</textarea></label>
+              <label class="num" style="margin-top:8px">Контакт<textarea name="billboardContact">${d('billboardContact')}</textarea></label></div>
+            <div class="field"><span class="label">Мастер-классы ОТЭК в точке за последний год</span>
+              <div class="num-grid">${num('masterClasses', 'Количество')}</div></div>`)}
           <div class="field"><span class="label">Интерес к сотрудничеству <span class="req">*</span></span>${chips('interest', INTEREST, 'radio', [src.interest])}</div>
           <div class="field"><label>Итог / следующий шаг</label><textarea name="nextStep" placeholder="Например: отправить прайс в WhatsApp, перезвонить в пятницу">${d('nextStep')}</textarea></div>
           <div class="field"><label>Дата следующего шага</label><input type="date" name="nextDate" min="${today()}" value="${d('nextDate')}">
@@ -1311,7 +1372,15 @@
       if ($('cancelEdit')) $('cancelEdit').onclick = () => { editing = null; revisit = null; photos = []; renderPoint(); };
       const f = $('f');
       if (!f) return;
-      f.oninput = () => { if (!editing) store.set('draft:' + id, readForm(f)); };
+      f.oninput = () => {
+        updateSums(f);
+        if (!editing) store.set('draft:' + id, readForm(f));
+      };
+      updateSums(f);
+      // Открытые разделы не сворачиваются, когда форма перерисовывается
+      f.querySelectorAll('details.sect').forEach((el) => {
+        el.ontoggle = () => { if (el.open) openSects.add(el.dataset.s); else openSects.delete(el.dataset.s); };
+      });
       bindPhotos($('photo'), $('photos'), photos, 6);
       f.onsubmit = (ev) => { ev.preventDefault(); submit(f); };
     }
@@ -1350,14 +1419,16 @@
       if (editing && $('f')) $('f').scrollIntoView();
     }
 
-    // Новый визит: контакты и поставщик берутся из последней анкеты, остальное заполняется заново
+    // Новый визит: контакты, поставщик и данные о помещении берутся из последней анкеты, остальное заполняется заново
     async function startRevisit(btn) {
       btn.disabled = true;
       let base = {};
       try {
         const r = await api.result(id);
-        if (r) ['contact', 'position', 'phone', 'whatsapp', 'instagram', 'supplier', 'alina']
+        if (r) ['contact', 'position', 'phone', 'whatsapp', 'instagram', 'supplier', 'alina', 'manager', 'format',
+          'formatDesc', 'payment', 'traffic', 'ready', 'areaHall', 'areaStock']
           .forEach((k) => { if (r[k]) base[k] = r[k]; });
+        if (base.alina) base.alina = OLD_ALINA[base.alina] || base.alina;
       } catch (e) { base = {}; }
       revisit = base;
       photos = [];
@@ -1436,14 +1507,26 @@
     };
     const a = split(r.assortment, ASSORTMENT);
     const c = split(r.competitors, COMPETITORS);
-    const out = {};
-    ['contact', 'position', 'phone', 'whatsapp', 'instagram', 'supplier', 'alina', 'interest', 'nextStep', 'nextDate', 'comment']
-      .forEach((k) => { out[k] = r[k] || ''; });
-    return Object.assign(out, {
+    const out = Object.assign({}, r, {
       assortment: a.chosen, assortmentOther: a.other,
       competitors: c.chosen, competitorsOther: c.other,
       ourBrands: split(r.ourBrands, OUR_BRANDS).chosen,
+      alina: OLD_ALINA[r.alina] || r.alina || '',
       photoCount: String(r.photos || '').split(/\s+/).filter(Boolean).length,
+    });
+    BRANDING_BRANDS.forEach((b) => { out['brand:' + b] = split(r['brand:' + b], BRANDING_KINDS).chosen; });
+    return out;
+  }
+
+  // Подсказка под долями: сумма должна быть 100%, но отправке это не мешает
+  function updateSums(f) {
+    const toNum = (s) => Number(String(s).replace(/\s/g, '').replace(',', '.')) || 0;
+    f.querySelectorAll('[data-sum]').forEach((el) => {
+      const total = Array.from(f.querySelectorAll('[data-g="' + el.dataset.sum + '"]'))
+        .reduce((s, i) => s + toNum(i.value), 0);
+      const rounded = Math.round(total * 100) / 100;
+      el.textContent = rounded ? 'Сумма: ' + rounded + '%' : '';
+      el.classList.toggle('warn', rounded !== 0 && rounded !== 100);
     });
   }
 
@@ -1458,6 +1541,7 @@
 
   function readForm(f) {
     const data = { assortment: [], competitors: [], ourBrands: [] };
+    BRANDING_BRANDS.forEach((b) => { data['brand:' + b] = []; });
     new FormData(f).forEach((v, k) => {
       if (k in data && Array.isArray(data[k])) data[k].push(v);
       else data[k] = String(v).trim();
