@@ -299,6 +299,21 @@ form fieldset { border: 0; padding: 0; margin: 0; }
 .chips label:has(input:checked) { background: var(--accent); color: var(--accent-ink); }
 .req { color: var(--bad); }
 
+/* Нерабочие точки */
+.row-item.closed .name { color: var(--bad); }
+.row-item.closed .num { background: var(--bad-bg); color: var(--bad); }
+.close-box { margin-top: 12px; padding-top: 12px; border-top: .5px solid var(--line); }
+.tabs.four button { font-size: 12.5px; padding-left: 1px; padding-right: 1px; min-width: 0; }
+
+/* Отчёт за день */
+.date-nav { display: grid; grid-template-columns: 48px 1fr 48px; gap: 8px; margin-bottom: 12px; }
+.date-nav .btn { width: 100%; min-width: 0; font-size: 22px; padding: 0; }
+.kv > div { display: flex; justify-content: space-between; gap: 14px; padding: 9px 0; border-top: .5px solid var(--line); }
+.kv > div:first-child { border-top: 0; padding-top: 0; }
+.kv > div:last-child { padding-bottom: 0; }
+.kv span { color: var(--muted); font-size: 14px; flex: 1 1 45%; min-width: 0; }
+.kv b { font-weight: 500; font-size: 15px; text-align: right; flex: 1 1 55%; min-width: 0; white-space: pre-line; overflow-wrap: anywhere; }
+
 /* Разделы анкеты: сворачиваются, чтобы не листать все поля */
 .sect { border-top: 1px solid var(--line); margin: 0 -16px; padding: 0 16px; }
 .sect:last-of-type { border-bottom: 1px solid var(--line); margin-bottom: 16px; }

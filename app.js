@@ -36,6 +36,7 @@
     'Отработать по брендингу в торговой точке',
   ];
   const FAR_METERS = 300;
+  const CLOSE_REASONS = ['Закрылась', 'Временно не работает', 'Нет по этому адресу', 'Другое'];
 
   const $ = (id) => document.getElementById(id);
   const $app = $('app');
@@ -63,6 +64,7 @@
   const cache = {
     summary: store.get('cache:summary', null), points: {}, tasks: store.get('cache:tasks', null),
     stats: store.get('cache:stats', {}), me: store.get('cache:me', {}), staff: store.get('cache:staff', null),
+    report: {},
   };
   const saveCache = (k) => store.set('cache:' + k, cache[k]);
   let refreshTimer = null;
@@ -232,6 +234,10 @@
       update: (id, form, photos) => post('update', { id, form, photos }).then((d) => d.point),
       remove: (id) => post('remove', { id }).then((d) => d.point),
       pointAdd: (point) => post('pointAdd', { point }).then((d) => d.point),
+      pointClose: (id, reason, comment, geo) => post('pointClose', { id, reason, comment, geo }).then((d) => d.point),
+      pointReopen: (id) => post('pointReopen', { id }).then((d) => d.point),
+      report: (date) => post('report', { date }).then((d) => d.report),
+      reportSend: (date) => post('reportSend', { date }),
       addrAt: (lat, lon) => post('addrAt', { lat, lon }).then((d) => d.address),
       pos: (geo, keepalive) => post('pos', { geo }, keepalive),
       positions: () => post('positions', {}).then((d) => d.positions),
@@ -276,7 +282,8 @@
       (await load()).routes.concat(addedRoute()).forEach((r) => r.points.forEach((p) => {
         const st = s[p.id] || {};
         out.push(Object.assign({ route: r.route, lat: null, lon: null, acc: p.lat != null ? 'точно' : '' }, p,
-          { status: st.status || 'свободна', agent: st.agent || '', visits: st.visits || 0, lastVisit: fmtTime(st.last) }));
+          { status: st.status || 'свободна', agent: st.agent || '', visits: st.visits || 0, lastVisit: fmtTime(st.last),
+            closedReason: st.closedReason || '', closedNote: st.closedNote || '', closedBy: st.closedBy || '', closedAt: fmtTime(st.closedAt) }));
       }));
       return out;
     };
@@ -323,9 +330,9 @@
         const by = {};
         (await all()).forEach((p) => {
           const r = by[p.route] || (by[p.route] = { route: p.route,
-            title: (base.routes.concat(addedRoute()).find((x) => x.route === p.route) || {}).title || '', total: 0, free: 0, work: 0, done: 0 });
+            title: (base.routes.concat(addedRoute()).find((x) => x.route === p.route) || {}).title || '', total: 0, free: 0, work: 0, done: 0, closed: 0 });
           r.total++;
-          if (p.status === 'выполнена') r.done++; else if (p.status === 'в работе') r.work++; else r.free++;
+          if (p.status === 'выполнена') r.done++; else if (p.status === 'в работе') r.work++; else if (p.status === 'закрыта') r.closed++; else r.free++;
         });
         return wait(Object.values(by));
       },
@@ -345,6 +352,52 @@
         log(me.agent, 'добавил точку', id, f.name + ' · ' + f.address);
         return wait(await find(id));
       },
+      pointClose: async (id, reason, comment) => {
+        const p = await find(id);
+        if (p.status === 'закрыта') fail('Точка уже отмечена как нерабочая (' + p.closedBy + ')');
+        if (!reason) fail('Укажите причину');
+        log(me.agent, 'отметил нерабочей', id, p.name + ' · ' + reason);
+        return wait(await setState(id, { status: 'закрыта', closedReason: reason, closedNote: comment || '', closedBy: me.agent, closedAt: new Date().toISOString() }));
+      },
+      pointReopen: async (id) => {
+        const p = await find(id);
+        if (p.status !== 'закрыта') fail('Точка не отмечена как нерабочая');
+        if (!isManager() && p.closedBy !== me.agent) fail('Вернуть точку может ' + p.closedBy + ' или руководитель');
+        log(me.agent, 'вернул точку в работу', id, p.name);
+        return wait(await setState(id, { status: p.visits ? 'выполнена' : 'свободна', closedReason: '', closedNote: '', closedBy: '', closedAt: '' }));
+      },
+      report: async (date) => {
+        const pts = await all();
+        const isDay = (iso) => iso && ymd(new Date(iso)) === date;
+        const by = {};
+        const ag = (name) => by[name] || (by[name] = { name, goal: 0, start: '', end: '', visits: 0, newPoints: 0, repeat: 0, far: 0, noGps: 0, closed: 0, added: 0,
+          issued: 0, taken: 0, done: 0, first: '', last: '', items: [], closedItems: [], addedItems: [] });
+        staffDb().forEach((s) => ag(s.name));
+        results().filter((r) => isDay(r.time)).forEach((r) => {
+          const a = ag(r.agent);
+          const p = pts.find((x) => x.id === r.id) || {};
+          const prev = a.items[a.items.length - 1];
+          const t = Date.parse(r.time);
+          a.visits++;
+          if (r.visit > 1) a.repeat++; else a.newPoints++;
+          if (!r.gps) a.noGps++;
+          a.first = a.first || hm(r.time); a.last = hm(r.time);
+          const fields = Object.keys(r.form).filter((k) => r.form[k] && r.form[k].length && k !== 'uid' && k !== 'geo').map((k) => [k, String(r.form[k])]);
+          a.items.push({ id: r.id, route: p.route, n: p.n, name: p.name, type: p.type, address: p.address, time: hm(r.time), t, visit: r.visit || 1,
+            gps: r.gps ? 'GPS' : '', distance: r.distance === '' || r.distance == null ? null : r.distance, far: r.distance > FAR_METERS,
+            from: prev ? prev.name : '', fromMin: prev ? Math.round((t - prev.t) / 60000) : null, fromKm: null, interest: r.form.interest, nextStep: r.form.nextStep,
+            photos: [], sections: [{ title: 'Анкета', fields }] });
+        });
+        const closed = pts.filter((p) => p.status === 'закрыта' && isDay(state()[p.id].closedAt)).map((p) => ({ id: p.id, route: p.route, n: p.n, name: p.name, address: p.address,
+          reason: p.closedReason, note: p.closedNote, by: p.closedBy, time: hm(state()[p.id].closedAt) }));
+        closed.forEach((c) => { const a = ag(c.by); a.closed++; a.closedItems.push(c); });
+        const agents = Object.values(by).sort((a, b) => b.visits - a.visits || a.name.localeCompare(b.name));
+        const sum = (k) => agents.reduce((s, a) => s + a[k], 0);
+        return wait({ date, label: date.split('-').reverse().join('.'), agents, closed, added: [], tasks: [], active: !!(sum('visits') || closed.length),
+          totals: { visits: sum('visits'), newPoints: sum('newPoints'), repeat: sum('repeat'), far: sum('far'), noGps: sum('noGps'), closed: closed.length, added: 0, issued: 0, taken: 0, done: 0 },
+          akb: { total: pts.length, done: pts.filter((p) => p.status === 'выполнена').length, work: 0, free: 0, closed: pts.filter((p) => p.status === 'закрыта').length } });
+      },
+      reportSend: () => wait({ sent: true, to: 'демо-адрес' }),
       addrAt: () => wait('Алматы, демо-адрес по геолокации'),
       pos: (geo) => {
         const db = store.get('mock:pos', {});
@@ -613,6 +666,8 @@
     camera: icon('<path d="M3.5 8.5A1.5 1.5 0 0 1 5 7h2.5L9 4.5h6L16.5 7H19a1.5 1.5 0 0 1 1.5 1.5v9.5A1.5 1.5 0 0 1 19 19.5H5A1.5 1.5 0 0 1 3.5 18z"/><circle cx="12" cy="13" r="3.5"/>'),
     check: icon('<path d="m5 12.5 4.5 4.5L19 7.5"/>'),
     users: icon('<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c.4-3.6 3.2-5.5 6.5-5.5s6.1 1.9 6.5 5.5"/><path d="M15.5 4.8a3.5 3.5 0 0 1 0 6.4M17.5 14.8c2.2.6 3.7 2.4 4 5.2"/>'),
+    closed: icon('<circle cx="12" cy="12" r="9"/><path d="m5.7 5.7 12.6 12.6"/>'),
+    report: icon('<path d="M6 3.5h9l4 4V20a.5.5 0 0 1-.5.5h-12A.5.5 0 0 1 6 20z"/><path d="M15 3.5V8h4M9 12.5h6M9 16h6"/>'),
     chev: icon('<path d="m9 5 7 7-7 7"/>', 'chev'),
   };
   const chev = I.chev;
@@ -659,7 +714,7 @@
     if (!authed) return;
     const h = location.hash.replace(/^#\/?/, '');
     const cur = h === 'add' ? 'add' : /^(tasks|td\/)/.test(h) ? 'tasks'
-      : /^(stats|staff|teammap)/.test(h) || (/^me\/./.test(h) && isManager()) ? 'stats'
+      : /^(stats|staff|teammap|report|rv\/)/.test(h) || (/^me\/./.test(h) && isManager()) ? 'stats'
       : /^(me|pin)/.test(h) ? 'me' : 'home';
     const c = cache.tasks ? taskCounts(cache.tasks) : null;
     const tabs = [['home', '#/', 'Сегодня', I.home], ['tasks', '#/tasks', 'Задания', I.tasks]]
@@ -686,6 +741,9 @@
     const h = location.hash.replace(/^#\/?/, '');
     let m;
     if (h === 'add') return addView();
+    if (h === 'closed') return closedView();
+    if (h === 'report') return reportView();
+    if ((m = h.match(/^rv\/(\d{4}-\d{2}-\d{2})\/([^/]+)\/(\d+)$/))) return reportVisitView(m[1], decodeURIComponent(m[2]), Number(m[3]));
     if ((m = h.match(/^r\/(\d+)$/))) return listView(Number(m[1]));
     if ((m = h.match(/^map\/(\d+)$/))) return mapView(Number(m[1]));
     if ((m = h.match(/^p\/(R\d+-\d+)$/))) return pointView(m[1]);
@@ -1048,12 +1106,41 @@
   function akbCard(routes) {
     if (!routes || !routes.length) return '';
     const sum = (k) => routes.reduce((s, r) => s + (r[k] || 0), 0);
-    const total = sum('total'), done = sum('done'), work = sum('work'), free = sum('free');
-    const pct = total ? done / total * 100 : 0;
+    const total = sum('total'), done = sum('done'), work = sum('work'), free = sum('free'), closed = sum('closed');
+    // Нерабочие точки выполнить нельзя, поэтому процент считается только от рабочих
+    const active = total - closed;
+    const pct = active ? done / active * 100 : 0;
     return `<div class="card akb"><div class="goal-main">${ring(Math.round(pct), 72)}
       <div class="grow"><div class="muted">АКБ · все маршруты</div>
-        <div class="goal-num">${done} <span>из ${total}</span></div>
-        <div class="muted" style="font-size:13px">выполнено ${String(Math.round(pct * 10) / 10).replace('.', ',')}% · в работе ${work} · свободно ${free}</div></div></div></div>`;
+        <div class="goal-num">${done} <span>из ${active}</span></div>
+        <div class="muted" style="font-size:13px">выполнено ${String(Math.round(pct * 10) / 10).replace('.', ',')}% · в работе ${work} · свободно ${free}</div>
+        ${closed ? `<div class="muted" style="font-size:13px"><span style="color:var(--bad)">не работают ${closed}</span> · загружено всего ${total}</div>` : ''}</div></div></div>`;
+  }
+
+  function closedRow(routes) {
+    const n = routes.reduce((s, r) => s + (r.closed || 0), 0);
+    return n ? `<div class="list"><a class="row-item has-icon" href="#/closed"><span class="ri-icon" style="background:var(--bad)">${I.closed}</span>
+      <span class="grow"><span class="ri-title">Нерабочие точки</span><span class="ri-sub" style="display:block">Закрылись или не работают: ${n}</span></span>${chev}</a></div>` : '';
+  }
+
+  // Все нерабочие точки по всем маршрутам
+  function closedView() {
+    setBar('Нерабочие точки', '#/');
+    const hash = location.hash;
+    const render = () => {
+      if (location.hash !== hash) return;
+      const list = allCachedPoints().filter((p) => p.status === 'закрыта');
+      $app.innerHTML = list.length ? '<div class="list">' + list.map((p) => `<a class="row-item point closed" href="#/p/${p.id}">
+          <span class="num">${p.n}</span>
+          <span class="grow"><div class="name">${esc(p.name)}</div><div class="addr">Маршрут ${p.route} · ${esc(cleanAddr(p.address))}</div>
+            <span class="badge bad">${esc(p.closedReason)}</span><div class="muted" style="font-size:13px">${esc(p.closedBy)} · ${esc(p.closedAt)}${p.closedNote ? ' · ' + esc(p.closedNote) : ''}</div></span>${chev}</a>`).join('') + '</div>'
+        : '<div class="empty">Нерабочих точек нет</div>';
+    };
+    render();
+    const load = () => Promise.all((cache.summary || []).map((r) => loadPoints(r.route))).then(render)
+      .catch((e) => toast(e.server ? e.message : 'Нет связи — показан сохранённый список', true));
+    load();
+    currentLoad = load;
   }
 
   function homeView() {
@@ -1073,15 +1160,16 @@
       $app.innerHTML = `<div class="subtitle">${esc(me.agent.split(' ')[0])} · ${esc(dateLine)}</div>` +
         goalCard(cache.me['|day']) + akbCard(routes) + tasksRow() +
         '<div class="section-title">Маршруты</div>' + (routes ? '<div class="list">' + routes.map((r) => {
-          const pd = r.total ? (r.done / r.total) * 100 : 0;
-          const pw = r.total ? (r.work / r.total) * 100 : 0;
+          const active = r.total - (r.closed || 0);
+          const pd = active ? (r.done / active) * 100 : 0;
+          const pw = active ? (r.work / active) * 100 : 0;
           return `<a class="row-item" href="#/r/${r.route}">
             <span class="grow"><span class="ri-title">Маршрут ${r.route}</span>
               ${r.title ? `<span class="ri-sub" style="display:block">${esc(r.title)}</span>` : ''}
               <span class="progress" style="display:flex"><span class="done" style="width:${pd}%"></span><span class="work" style="width:${pw}%"></span></span>
-              <span class="ri-sub">Выполнено ${r.done} из ${r.total}${r.work ? ' · в работе ' + r.work : ''}</span></span>
+              <span class="ri-sub">Выполнено ${r.done} из ${active}${r.work ? ' · в работе ' + r.work : ''}${r.closed ? ` · <span style="color:var(--bad)">не работают ${r.closed}</span>` : ''}</span></span>
             ${chev}</a>`;
-        }).join('') + `</div><p class="muted" style="text-align:center">Старт: Алматы, Казыбаева 20</p>
+        }).join('') + `</div>${closedRow(routes)}<p class="muted" style="text-align:center">Старт: Алматы, Казыбаева 20</p>
           <p class="muted" style="text-align:center;font-size:13px">Пока приложение открыто, руководитель видит ваше местоположение на карте команды.</p>` : '<div class="spinner">Загрузка…</div>');
       if ($('homeDay')) $('homeDay').onclick = async (ev) => {
         ev.target.disabled = true;
@@ -1119,9 +1207,10 @@
       else if (p.status === 'выполнена') badge = `<span class="badge done">✓ ${esc(p.agent)}</span>`;
       else if (mine) badge = '<span class="badge work">у вас в работе</span>';
       else if (p.status === 'в работе') badge = `<span class="badge work">взял(а): ${esc(p.agent)}</span>`;
+      else if (p.status === 'закрыта') badge = `<span class="badge bad">${esc(p.closedReason || 'не работает')}</span>`;
       if (p.visits > 1) badge += `<span class="badge info">${p.visits} ${plural(p.visits, 'визит', 'визита', 'визитов')}</span>`;
       const dist = ui.pos && hasCoords(p) ? `<span class="dist">${km(ui.pos, p).toFixed(1)} км</span>` : '';
-      return `<a class="row-item point${mine ? ' mine' : ''}" href="#/p/${p.id}">
+      return `<a class="row-item point${mine ? ' mine' : ''}${p.status === 'закрыта' ? ' closed' : ''}" href="#/p/${p.id}">
         <span class="num">${p.n}</span>
         <span class="grow"><div class="name">${esc(p.name)}</div>
           <div class="addr">${esc(p.type)}${p.type ? ' · ' : ''}${esc(cleanAddr(p.address))}</div>${badge}</span>
@@ -1140,6 +1229,7 @@
       const free = list.filter((p) => p.status === 'свободна' && !isPending(p.id));
       const taken = list.filter((p) => p.status === 'в работе' && p.agent !== me.agent && !isPending(p.id));
       const done = list.filter((p) => p.status === 'выполнена' || isPending(p.id));
+      const closed = list.filter((p) => p.status === 'закрыта' && !isPending(p.id));
 
       const searchFocused = document.activeElement && document.activeElement.id === 'q';
       const caret = searchFocused ? document.activeElement.selectionStart : null;
@@ -1149,17 +1239,19 @@
           <div class="seg"><button data-sort="order" class="${ui.sort === 'order' ? 'on' : ''}">По порядку</button>
             <button data-sort="near" class="${ui.sort === 'near' ? 'on' : ''}">Ближайшие</button></div>
         </div>
-        <div class="seg tabs">
+        <div class="seg tabs four">
           <button data-tab="free" class="${ui.tab === 'free' ? 'on' : ''}">Свободные<b>${free.length + mine.length}</b></button>
           <button data-tab="taken" class="${ui.tab === 'taken' ? 'on' : ''}">Заняты<b>${taken.length}</b></button>
           <button data-tab="done" class="${ui.tab === 'done' ? 'on' : ''}">Выполнено<b>${done.length}</b></button>
+          <button data-tab="closed" class="${ui.tab === 'closed' ? 'on' : ''}">Нерабочие<b${closed.length ? ' style="color:var(--bad)"' : ''}>${closed.length}</b></button>
         </div>
         ${ui.tab === 'free' ? `
           ${mine.length ? '<div class="section-title">У меня в работе</div>' + group(mine) : ''}
           <div class="section-title">Свободные</div>
           ${free.length ? group(free) : '<div class="empty">Свободных точек нет</div>'}` : ''}
         ${ui.tab === 'taken' ? (taken.length ? group(taken) : '<div class="empty">Нет точек, занятых другими</div>') : ''}
-        ${ui.tab === 'done' ? (done.length ? group(done) : '<div class="empty">Выполненных точек пока нет</div>') : ''}`;
+        ${ui.tab === 'done' ? (done.length ? group(done) : '<div class="empty">Выполненных точек пока нет</div>') : ''}
+        ${ui.tab === 'closed' ? (closed.length ? group(closed) : '<div class="empty">Нерабочих точек нет</div>') : ''}`;
 
       const qi = $('q');
       qi.oninput = () => { ui.q = qi.value; render(pts); };
@@ -1416,13 +1508,14 @@
     let editing = null; // значения анкеты, когда автор её редактирует
     let revisit = null; // новый визит на выполненную точку: контакты из прошлой анкеты
     const openSects = new Set(['assort']);
+    let closing = false; // открыта форма «точка не работает»
     let history = null; // визиты точки, когда история открыта
     let ptasks = cache.tasks ? cache.tasks.filter((t) => t.point === id) : null; // сразу из сохранённых, потом обновятся
     renderPoint();
     // Актуальный статус с сервера
     loadPoints(routeNo).then((pts) => {
       const fresh = pts.find((x) => x.id === id);
-      if (fresh && location.hash === hash && !editing && !revisit &&
+      if (fresh && location.hash === hash && !editing && !revisit && !closing &&
         (fresh.status !== p.status || fresh.agent !== p.agent || fresh.visits !== p.visits)) {
         p = fresh;
         renderPoint();
@@ -1464,13 +1557,19 @@
       const other = p.status === 'в работе' && !mine;
       const done = p.status === 'выполнена';
       const pending = isPending(id);
-      const canFill = (!other && !done && !pending) || !!editing || !!revisit;
+      const closed = p.status === 'закрыта';
+      const canFill = (!other && !done && !pending && !closed) || !!editing || !!revisit;
       const ownDone = done && !pending;
       const src = editing || (revisit ? Object.assign({}, revisit, draft) : draft);
+      const canReopen = closed && (isManager() || p.closedBy === me.agent);
 
       let status = '';
       if (pending) status = '<div class="status-box work">Анкета сохранена и ждёт отправки (нет связи)</div>';
-      else if (done) {
+      else if (closed) {
+        status = `<div class="status-box other">Точка не работает: ${esc(p.closedReason)}
+          <div class="muted" style="font-weight:400">Отметил(а) ${esc(p.closedBy)}${p.closedAt ? ' · ' + esc(p.closedAt) : ''}</div>
+          ${p.closedNote ? `<div style="font-weight:400">${esc(p.closedNote)}</div>` : ''}</div>`;
+      } else if (done) {
         status = `<div class="status-box done">✓ Выполнена — ${esc(p.agent)}${p.visits > 1 ? ` · визитов: ${p.visits}` : ''}
           ${p.lastVisit ? `<div class="muted" style="font-weight:400">Последний визит: ${esc(p.lastVisit)}</div>` : ''}</div>`;
       } else if (other) status = `<div class="status-box other">Точку взял(а): ${esc(p.agent)}</div>`;
@@ -1507,7 +1606,7 @@
           <div class="quick">${quick}</div>
           ${routable(p) ? '' : '<div class="muted" style="font-size:13px">«Маршрут» откроет карточку фирмы в 2ГИС — нажмите там «Проехать».</div>'}
           ${status}
-          ${!done && !other && !pending ? (mine
+          ${!done && !other && !pending && !closed ? (mine
             ? '<button class="btn ghost" id="release">Отказаться от точки</button>'
             : `<button class="btn primary" id="claim">${I.check} Беру в работу</button>`) : ''}
           ${ownDone && !editing && !revisit ? `<div class="btns">
@@ -1517,7 +1616,14 @@
             <button class="btn danger" id="remove">${I.trash} Удалить</button></div>
             <button class="link-btn" id="hist">${history ? 'Скрыть историю' : 'История визитов (' + (p.visits || 1) + ')'}</button>
             <div id="histbox"></div>` : ''}
-          ${!done && !pending ? `<a class="btn" href="#/give/${id}" style="margin-top:8px">${I.plus} Дать задание</a>` : ''}
+          ${!done && !pending && !closed ? `<a class="btn" href="#/give/${id}" style="margin-top:8px">${I.plus} Дать задание</a>` : ''}
+          ${canReopen ? `<button class="btn" id="reopen" style="margin-top:8px">${I.repeat} Вернуть в работу</button>` : ''}
+          ${!closed && !pending && !editing && !revisit ? (closing ? `<div class="close-box">
+              <div class="field"><span class="label">Почему точка не работает? <span class="req">*</span></span>${chips('closeReason', CLOSE_REASONS, 'radio', [])}</div>
+              <div class="field"><label>Комментарий</label><textarea id="closeNote" placeholder="Например: вывеска снята, помещение сдаётся"></textarea></div>
+              <button class="btn danger" id="closeGo" type="button">${I.closed} Отметить нерабочей</button>
+              <button class="btn ghost" id="closeCancel" type="button" style="margin-top:8px">Отмена</button></div>`
+            : `<button class="btn danger" id="closeOpen" style="margin-top:8px">${I.closed} Точка не работает / закрылась</button>`) : ''}
         </div>
         <div id="ptasks"></div>
         ${canFill ? `
@@ -1598,6 +1704,24 @@
       };
       if ($('revisit')) $('revisit').onclick = (ev) => startRevisit(ev.target);
       if ($('hist')) $('hist').onclick = () => toggleHistory();
+      if ($('closeOpen')) $('closeOpen').onclick = () => { closing = true; renderPoint(); };
+      if ($('closeCancel')) $('closeCancel').onclick = () => { closing = false; renderPoint(); };
+      if ($('closeGo')) $('closeGo').onclick = async (ev) => {
+        const picked = $app.querySelector('input[name="closeReason"]:checked');
+        if (!picked) return toast('Выберите причину', true);
+        const note = $('closeNote').value.trim();
+        const btn = ev.currentTarget;
+        btn.disabled = true;
+        const geo = await getGeo();
+        closing = false;
+        await act(btn, () => api.pointClose(id, picked.value, note, geo), 'Точка перенесена в нерабочие');
+        refreshAll().catch(() => {});
+      };
+      if ($('reopen')) $('reopen').onclick = async (ev) => {
+        if (!confirm('Вернуть точку в работу?')) return;
+        await act(ev.currentTarget, () => api.pointReopen(id), 'Точка возвращена в работу');
+        refreshAll().catch(() => {});
+      };
       drawHistory();
       drawTasks();
       if ($('cancelEdit')) $('cancelEdit').onclick = () => { editing = null; revisit = null; photos = []; renderPoint(); };
@@ -2029,6 +2153,8 @@
         <div class="section-title">Сегодня по команде</div>
         <div class="card">${(s.today || []).length ? s.today.map(teamRow).join('') : '<div class="muted">Сотрудники ещё не входили</div>'}</div>
         <div class="list">
+          <a class="row-item has-icon" href="#/report"><span class="ri-icon">${I.report}</span><span class="grow"><span class="ri-title">Отчёт за день</span>
+            <span class="ri-sub" style="display:block">Кто, где и что заполнил</span></span>${chev}</a>
           <a class="row-item has-icon" href="#/teammap"><span class="ri-icon" style="background:var(--ok)">${I.map}</span><span class="grow">Карта команды</span>${chev}</a>
           <a class="row-item has-icon" href="#/staff"><span class="ri-icon" style="background:#8e8e93">${I.users}</span><span class="grow">Сотрудники</span>${chev}</a>
           <a class="row-item has-icon" href="#/tasks" id="allTasks"><span class="ri-icon">${I.tasks}</span><span class="grow">Все задания команды</span>${chev}</a>
@@ -2073,6 +2199,157 @@
     show();
     currentLoad = show;
     refreshTimer = setInterval(show, 60000);
+  }
+
+  /* ---------- Отчёт за день (руководитель) ---------- */
+  function reportView() {
+    if (!isManager()) { location.hash = '#/'; return; }
+    setBar('Отчёт за день', '#/stats');
+    const hash = location.hash;
+    if (!ui.repDate) ui.repDate = today();
+    const tile = (v, label, bad) => `<div class="tile${bad && v ? ' bad' : ''}"><b>${v}</b><span>${label}</span></div>`;
+    const km1 = (v) => String(v).replace('.', ',');
+    const fromLine = (i) => {
+      const parts = [i.from ? 'Откуда: ' + esc(i.from) : ''];
+      if (i.fromMin != null) parts.push(i.fromMin + ' мин');
+      if (i.fromKm != null) parts.push(km1(i.fromKm) + ' км по прямой');
+      return parts.filter(Boolean).join(' · ');
+    };
+    const interestClass = { 'Высокий': 'done', 'Средний': 'info', 'Низкий': 'work', 'Отказ': 'bad' };
+    const visitRow = (a, i, idx) => `<a class="row-item" href="#/rv/${ui.repDate}/${encodeURIComponent(a.name)}/${idx}">
+      <span class="grow"><div class="name">${esc(i.time)} · ${esc(i.name)}</div>
+        <div class="addr">${esc(cleanAddr(i.address || ''))}</div>
+        ${fromLine(i) ? `<div class="muted" style="font-size:13px">${fromLine(i)}</div>` : ''}
+        ${i.interest ? `<span class="badge ${interestClass[i.interest] || ''}">${esc(i.interest)}</span>` : ''}
+        ${i.visit > 1 ? `<span class="badge info">визит ${i.visit}</span>` : ''}
+        ${i.far ? `<span class="badge bad">${esc(i.distance)} м от точки</span>` : ''}
+        ${!i.gps ? '<span class="badge work">без GPS</span>' : ''}
+        ${i.photos.length ? `<span class="badge">фото ${i.photos.length}</span>` : ''}</span>${chev}</a>`;
+    const closedRows = (list, withWho) => `<div class="list">${list.map((c) => `<a class="row-item point closed" href="#/p/${esc(c.id)}">
+      <span class="grow"><div class="name">${esc(c.time)} · ${esc(c.name)}</div><div class="addr">${esc(cleanAddr(c.address))}</div>
+        <span class="badge bad">${esc(c.reason)}</span>${withWho ? `<span class="badge">${esc(c.by)}</span>` : ''}
+        ${c.note ? `<div class="muted" style="font-size:13px">${esc(c.note)}</div>` : ''}</span>${chev}</a>`).join('')}</div>`;
+    const addedRows = (list, withWho) => `<div class="list">${list.map((c) => `<a class="row-item" href="#/p/${esc(c.id)}">
+      <span class="grow"><div class="name">${esc(c.time)} · ${esc(c.name)}</div><div class="addr">${esc(c.address)}</div>
+        ${withWho ? `<span class="badge">${esc(c.by)}</span>` : ''}</span>${chev}</a>`).join('')}</div>`;
+    const taskRows = (list) => `<div class="card">${list.map((t) => `<div class="todo"><b>${esc(t.name)}</b> <span class="badge">${esc(t.status)}</span>
+      <div class="muted">${esc(t.type)}${t.author ? ' · выдал(а) ' + esc(t.author) : ''}${t.assignee ? ' · исполнитель ' + esc(t.assignee) : ''}</div>
+      ${t.result ? `<div>${esc(t.result)}</div>` : ''}</div>`).join('')}</div>`;
+
+    const render = (r) => {
+      if (location.hash !== hash) return;
+      const who = r && r.agents.some((a) => a.name === ui.repWho) ? ui.repWho : '';
+      const person = who ? r.agents.find((a) => a.name === who) : null;
+      const t = person || (r && r.totals);
+      const worked = r ? r.agents.filter((a) => a.visits || a.closed || a.added || a.issued || a.done) : [];
+      const idle = r ? r.agents.filter((a) => worked.indexOf(a) < 0) : [];
+      const tasks = r ? (person ? r.tasks.filter((x) => x.author === who || x.assignee === who) : r.tasks) : [];
+      $app.innerHTML = `
+        <div class="date-nav">
+          <button class="btn small" id="repPrev" aria-label="Предыдущий день">‹</button>
+          <div class="field" style="margin:0"><input type="date" id="repDate" max="${today()}" value="${ui.repDate}"></div>
+          <button class="btn small" id="repNext" aria-label="Следующий день"${ui.repDate >= today() ? ' disabled' : ''}>›</button>
+        </div>
+        <div class="field"><span class="label">Ответственный</span><select id="repWho">
+          <option value="">Все сотрудники</option>
+          ${r ? r.agents.map((a) => `<option value="${esc(a.name)}"${a.name === who ? ' selected' : ''}>${esc(a.name)} (${a.visits})</option>`).join('') : ''}
+        </select></div>
+        ${!r ? '<div class="spinner">Собираем отчёт…</div>' : `
+        ${person ? `<div class="card"><h3>${esc(person.name)}</h3>
+            <div class="muted">${esc(dayText(person))}${person.goal ? ' · цель ' + person.goal + ' точек' : ''}</div>
+            ${person.first ? `<div class="muted">Первый визит ${esc(person.first)}, последний ${esc(person.last)}</div>` : ''}
+            <a href="#/me/${encodeURIComponent(person.name)}">Кабинет сотрудника ›</a></div>` : ''}
+        <div class="tiles">
+          ${tile(t.visits, 'посещено точек')}${tile(t.newPoints, 'новых')}${tile(t.repeat, 'повторных')}${tile(t.closed, 'отмечено нерабочими', true)}
+          ${tile(t.far, 'далеко от точки', true)}${tile(t.noGps, 'без GPS')}${tile(t.added, 'новых адресов')}${tile(t.done, 'заданий выполнено')}
+        </div>
+        ${person ? `<div class="section-title">Точки по порядку</div>
+          ${person.items.length ? `<div class="list">${person.items.map((i, idx) => visitRow(person, i, idx)).join('')}</div>` : '<div class="empty">Визитов за этот день нет</div>'}
+          ${person.closedItems.length ? '<div class="section-title">Отметил нерабочими</div>' + closedRows(person.closedItems) : ''}
+          ${person.addedItems.length ? '<div class="section-title">Добавил адреса</div>' + addedRows(person.addedItems) : ''}`
+        : `<div class="section-title">Сотрудники</div>
+          ${worked.length ? `<div class="list">${worked.map((a) => `<button class="row-item" data-who="${esc(a.name)}" style="text-align:left">
+            <span class="grow"><div class="name">${esc(a.name)}</div>
+              <div class="muted" style="font-size:13px">${esc(dayText(a))}</div>
+              <div class="muted" style="font-size:13px">Точек ${a.visits} · новых ${a.newPoints} · повторных ${a.repeat}${a.first ? ' · ' + esc(a.first) + '–' + esc(a.last) : ''}</div>
+              ${a.closed ? `<span class="badge bad">нерабочих ${a.closed}</span>` : ''}${a.far ? `<span class="badge bad">далеко ${a.far}</span>` : ''}
+              ${a.noGps ? `<span class="badge work">без GPS ${a.noGps}</span>` : ''}${a.added ? `<span class="badge info">адресов ${a.added}</span>` : ''}</span>${chev}</button>`).join('')}</div>`
+            : '<div class="empty">За этот день никто ничего не заполнял</div>'}
+          ${idle.length ? `<div class="section-title">Без визитов</div><div class="card muted">${idle.map((a) => esc(a.name)).join(', ')}</div>` : ''}
+          ${r.closed.length ? '<div class="section-title">Отмечены нерабочими</div>' + closedRows(r.closed, true) : ''}
+          ${r.added.length ? '<div class="section-title">Новые адреса</div>' + addedRows(r.added, true) : ''}`}
+        ${tasks.length ? '<div class="section-title">Задания</div>' + taskRows(tasks) : ''}
+        <div class="muted" style="text-align:center;font-size:13px;margin:12px 0 8px">АКБ сейчас: выполнено ${r.akb.done} из ${r.akb.total - r.akb.closed}${r.akb.closed ? ' · не работают ' + r.akb.closed : ''}</div>
+        <button class="btn" id="repSend">Отправить отчёт за ${esc(r.label)} на почту</button>`}`;
+
+      const setDate = (d) => { ui.repDate = d; show(); };
+      const shift = (n) => { const d = new Date(ui.repDate + 'T12:00:00'); d.setDate(d.getDate() + n); setDate(ymd(d)); };
+      $('repPrev').onclick = () => shift(-1);
+      $('repNext').onclick = () => shift(1);
+      $('repDate').onchange = (ev) => { if (ev.target.value) setDate(ev.target.value); };
+      $('repWho').onchange = (ev) => { ui.repWho = ev.target.value; render(r); window.scrollTo(0, 0); };
+      $app.querySelectorAll('[data-who]').forEach((b) => {
+        b.onclick = () => { ui.repWho = b.dataset.who; render(r); window.scrollTo(0, 0); };
+      });
+      if ($('repSend')) $('repSend').onclick = async (ev) => {
+        if (!confirm('Отправить отчёт за ' + r.label + ' на почту?')) return;
+        const btn = ev.currentTarget;
+        btn.disabled = true;
+        btn.textContent = 'Собираем и отправляем…';
+        try {
+          const res = await api.reportSend(r.date);
+          toast('Отчёт отправлен: ' + res.to);
+          btn.textContent = 'Отчёт отправлен';
+        } catch (e) {
+          toast(e.server ? e.message : 'Нет связи', true);
+          btn.disabled = false;
+          btn.textContent = 'Отправить отчёт за ' + r.label + ' на почту';
+        }
+      };
+    };
+
+    const show = () => {
+      const key = ui.repDate;
+      render(cache.report[key] || null);
+      return api.report(key).then((r) => { cache.report[key] = r; if (ui.repDate === key) render(r); })
+        .catch((e) => { if (!cache.report[key]) showError(e, reportView); else toast(e.server ? e.message : 'Нет связи', true); });
+    };
+    show();
+    currentLoad = show;
+    refreshTimer = setInterval(() => {
+      if (!document.activeElement || ['repDate', 'repWho'].indexOf(document.activeElement.id) < 0) show();
+    }, 60000);
+  }
+
+  // Один визит из отчёта: всё, что сотрудник заполнил
+  async function reportVisitView(date, who, idx) {
+    if (!isManager()) { location.hash = '#/'; return; }
+    setBar('Визит', '#/report');
+    const hash = location.hash;
+    let r = cache.report[date];
+    if (!r) {
+      $app.innerHTML = '<div class="spinner">Загрузка…</div>';
+      try { r = await api.report(date); cache.report[date] = r; } catch (e) { return showError(e, () => reportVisitView(date, who, idx)); }
+      if (location.hash !== hash) return;
+    }
+    const a = r.agents.find((x) => x.name === who);
+    const i = a && a.items[idx];
+    if (!i) return showError(new Error('Визит не найден'), () => { location.hash = '#/report'; });
+    $app.innerHTML = `
+      <div class="card">
+        <div class="muted">${esc(r.label)} · ${esc(i.time)} · ${esc(a.name)}${i.visit > 1 ? ' · визит ' + i.visit : ''}</div>
+        <h2>${esc(i.name)}</h2>
+        <div class="addr">${esc(i.address)}</div>
+        ${i.type ? `<div class="muted">${esc(i.type)}</div>` : ''}
+        ${i.from ? `<div class="muted" style="margin-top:8px">Откуда: ${esc(i.from)}${i.fromMin != null ? ' · ' + i.fromMin + ' мин' : ''}${i.fromKm != null ? ' · ' + String(i.fromKm).replace('.', ',') + ' км по прямой' : ''}</div>` : ''}
+        <div class="muted">${!i.gps ? 'Без GPS' : i.distance != null ? `${i.far ? '⚠️ ' : ''}${esc(i.distance)} м от точки при отправке` : 'GPS отмечен'}</div>
+        <a class="btn" href="#/p/${esc(i.id)}" style="margin-top:10px">Открыть точку</a>
+      </div>
+      ${i.sections.length ? i.sections.map((s) => `<div class="section-title">${esc(s.title)}</div>
+        <div class="card kv">${s.fields.map((f) => `<div><span>${esc(f[0])}</span><b>${esc(f[1])}</b></div>`).join('')}</div>`).join('')
+        : '<div class="empty">Анкета пустая</div>'}
+      ${i.photos.length ? `<div class="section-title">Фото</div><div class="list">${i.photos.map((u, n) =>
+        `<a class="row-item" href="${esc(u)}" target="_blank" rel="noopener"><span class="grow">Фото ${n + 1}</span>${chev}</a>`).join('')}</div>` : ''}`;
   }
 
   /* ---------- Личный кабинет: цель дня, рабочий день, статистика, дела ---------- */
@@ -2343,6 +2620,7 @@
     } catch (e) { return showError(e, () => mapView(routeNo)); }
     if (location.hash !== hash) return;
     const colorOf = (p) => isPending(p.id) || p.status === 'выполнена' ? '#1f8a4c'
+      : p.status === 'закрыта' ? '#d7281f'
       : p.status === 'в работе' ? (p.agent === me.agent ? '#2a3b7e' : '#f0a24a') : '#489ed7';
     const shown = pts.filter(hasCoords);
     $app.innerHTML = `
@@ -2350,6 +2628,7 @@
       <div class="map-legend">
         <span><i style="background:#489ed7"></i>свободна</span><span><i style="background:#2a3b7e"></i>у меня</span>
         <span><i style="background:#f0a24a"></i>у других</span><span><i style="background:#1f8a4c"></i>выполнена</span>
+        <span><i style="background:#d7281f"></i>не работает</span>
       </div>
       <div class="muted">На карте ${shown.length} из ${pts.length} точек${pts.length - shown.length ? ' · без координат: ' + (pts.length - shown.length) : ''}</div>
       <button class="btn ghost small" id="whereMe" style="margin-top:8px">${I.pin} Где я</button>`;
