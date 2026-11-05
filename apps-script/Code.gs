@@ -1890,7 +1890,8 @@ function nearestZone_(lat, lon) {
 /** № в зоне — порядок объезда: от центра города каждый раз к ближайшей следующей точке, точки без координат в конце. */
 function numberZones_(pts) {
   const center = zoneXY_(ALMATY_CENTER);
-  for (let z = 1; z <= ZONES; z++) {
+  // Все зоны, какие есть: кроме расчётных 1–6 бывает вынесенный вручную маршрут 8 «Область»
+  for (const z of new Set(pts.map(p => p.zone).filter(Boolean))) {
     const inZone = pts.filter(p => p.zone === z);
     const left = inZone.filter(p => p.lat != null);
     let cur = center, n = 0;
