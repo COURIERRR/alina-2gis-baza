@@ -1405,6 +1405,34 @@
     });
   }
 
+  /** Адрес из OpenStreetMap прямо с телефона: серверу Google этот сервис часто отвечает «слишком много запросов». */
+  async function osmAt(lat, lon) {
+    const none = { text: '', house: false };
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 5000);
+    try {
+      const res = await fetch('https://nominatim.openstreetmap.org/reverse?format=jsonv2&accept-language=ru&zoom=18&addressdetails=1&lat=' + lat + '&lon=' + lon, { signal: ctl.signal });
+      if (!res.ok) return none;
+      const a = (await res.json()).address || {};
+      if (!a.road) return none;
+      const place = a.city || a.town || a.village || a.suburb || '';
+      return { text: [a.road, a.house_number, place].filter(Boolean).join(', '), house: !!a.house_number };
+    } catch (e) {
+      return none;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** Адрес по координатам: сначала OpenStreetMap с телефона; нет дома — спрашиваем сервер, у него есть Google. */
+  async function addressAt(lat, lon) {
+    const osm = await osmAt(lat, lon);
+    if (osm.house) return osm.text;
+    let server = '';
+    try { server = await api.addrAt(lat, lon); } catch (e) { /* без сервера останется то, что нашёл телефон */ }
+    return /\d/.test(server) ? server : osm.text || server;
+  }
+
   function addView() {
     setBar('Новый адрес', '#/');
     const hash = location.hash;
@@ -1457,8 +1485,8 @@
       info.textContent = coords + '. Определяем адрес…';
       saveDraft();
       showNear();
-      let address = '';
-      try { address = await api.addrAt(geo.lat, geo.lon); } catch (e) { /* без адреса — введут вручную, координаты останутся */ }
+      // Пустой адрес — введут вручную, координаты останутся
+      const address = await addressAt(geo.lat, geo.lon);
       if (location.hash !== hash) return;
       btn.disabled = false;
       if (address) f.elements.address.value = address;

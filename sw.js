@@ -1,5 +1,5 @@
 // Кэш оболочки приложения: сначала сеть (чтобы обновления приходили сразу), без сети — кэш.
-const CACHE = 'alina-sales-v16';
+const CACHE = 'alina-sales-v17';
 const EXCELJS = 'https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js';
 const SHELL = ['./', 'index.html', 'styles.css', 'app.js', 'config.js', 'manifest.webmanifest',
   'icons/apple-touch-icon.png', 'icons/icon-192.png', 'icons/alina-logo.svg', 'icons/alina-logo-navy.svg',
