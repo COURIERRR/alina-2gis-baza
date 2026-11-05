@@ -393,7 +393,7 @@ function doPost(e) {
       case 'pointAdd': return withLock_(() => pointAdd_(agent, body.point || {}));
       case 'pointClose': return withLock_(() => pointClose_(agent, body.id, body));
       case 'pointReopen': return withLock_(() => pointReopen_(me, body.id));
-      case 'report': requireManager_(me); return { report: cached_('report:' + body.date, 300, () => dayReport_(String(body.date))) };
+      case 'report': requireManager_(me); return { report: cachedBig_('report:' + body.date, 300, () => dayReport_(String(body.date))) };
       case 'reportSend': requireManager_(me); return reportSend_(me.name, String(body.date));
       case 'reportXlsx': requireManager_(me); return reportXlsx_(String(body.date));
       case 'addrAt': return { address: addrAt_(body.lat, body.lon) };
@@ -479,6 +479,30 @@ function cached_(key, ttl, fn) {
   try { const hit = cache_().get(k); if (hit) return JSON.parse(hit); } catch (e) {}
   const value = fn();
   try { const s = JSON.stringify(value); if (s.length < CACHE_MAX) cache_().put(k, s, ttl); } catch (e) {}
+  return value;
+}
+// Для больших ответов (отчёт за день): значение кладётся кусками, лимит кэша — 100 КБ на кусок, кириллица — 2 байта на символ
+const CACHE_CHUNK = 40000;
+function cachedBig_(key, ttl, fn) {
+  const k = 'c:' + dataVer_() + ':' + key;
+  const chunkKeys = (n) => Array.from({ length: n }, (_, i) => k + ':' + i);
+  try {
+    const n = Number(cache_().get(k + ':n'));
+    if (n) {
+      const keys = chunkKeys(n);
+      const got = cache_().getAll(keys);
+      if (keys.every(x => got[x])) return JSON.parse(keys.map(x => got[x]).join(''));
+    }
+  } catch (e) {}
+  const value = fn();
+  try {
+    const s = JSON.stringify(value);
+    const n = Math.ceil(s.length / CACHE_CHUNK);
+    const parts = {};
+    chunkKeys(n).forEach((x, i) => { parts[x] = s.slice(i * CACHE_CHUNK, (i + 1) * CACHE_CHUNK); });
+    cache_().putAll(parts, ttl);
+    cache_().put(k + ':n', String(n), ttl);
+  } catch (e) {}
   return value;
 }
 // Отдельная версия для сотрудников: вход проверяется на каждом запросе, а меняются сотрудники редко
@@ -1483,7 +1507,12 @@ function dayReport_(date) {
       created: inDay(tc) ? hmIn_(tc) : '', taken: inDay(tt) ? hmIn_(tt) : '', done: inDay(td) ? hmIn_(td) : '' });
   });
 
-  const agents = Object.keys(by).map(k => by[k]).map(a => {
+  // Один человек мог завести две записи («Иванов Иван» и «Иван Иванов»): пустая запись-двойник в отчёт не идёт
+  const wordsKey = (n) => nameKey_(n).split(' ').sort().join(' ');
+  const busy = (a) => a.visits || a.closed || a.added || a.issued || a.taken || a.done || a.start;
+  const busyNames = {};
+  Object.keys(by).forEach(k => { if (busy(by[k])) busyNames[wordsKey(by[k].name)] = true; });
+  const agents = Object.keys(by).map(k => by[k]).filter(a => busy(a) || !busyNames[wordsKey(a.name)]).map(a => {
     a.items.forEach(i => { delete i.pos; });
     a.closedItems = closed.filter(c => nameKey_(c.by) === nameKey_(a.name));
     a.addedItems = added.filter(c => nameKey_(c.by) === nameKey_(a.name));
@@ -1500,7 +1529,9 @@ function dayReport_(date) {
   };
   out.active = !!(out.totals.visits || closed.length || added.length || tasks.length);
   out.prevVisits = prevVisits;
-  out.goal = sum('goal');
+  // Общая цель имеет смысл, только если её поставили все, кто работал
+  const workers = agents.filter(a => a.visits);
+  out.goal = workers.length && workers.every(a => a.goal) ? sum('goal') : 0;
   // Точки с высоким интересом: кому и что делать дальше
   out.hot = [];
   agents.forEach(a => a.items.forEach((i, idx) => {
@@ -1609,7 +1640,7 @@ function reportMail_(rep) {
   const link = APP_URL + '#/report/' + rep.date;
   const head = 'Посещено точек: ' + rep.totals.visits + (rep.goal ? ' из ' + rep.goal : '') + ' · вчера: ' + rep.prevVisits;
   const people = rep.agents.filter(a => a.visits || a.closed || a.added);
-  const line = (a) => a.name + ': ' + a.visits + (a.goal ? ' из ' + a.goal : '') + ' точек';
+  const line = (a) => a.name + ' — ' + a.visits + (a.goal ? ' из ' + a.goal : '');
   const body = 'Отчёт МТ за ' + rep.label + '\n\n' + head + '\n\n' +
     (people.length ? people.map(line).join('\n') + '\n\n' : '') +
     (rep.attention.length ? 'Требует внимания:\n' + rep.attention.map(x => '· ' + x).join('\n') + '\n\n' : '') +
