@@ -640,11 +640,39 @@ function pointAdd_(agent, f) {
 function addrAt_(lat, lon) {
   const la = Number(lat), lo = Number(lon);
   if (!isFinite(la) || !isFinite(lo)) fail_('Нет координат');
-  const r = Maps.newGeocoder().setLanguage('ru').setRegion('kz').reverseGeocode(la, lo);
-  const best = r.status === 'OK' && (r.results || []).find(x => (x.types || []).indexOf('plus_code') < 0);
-  if (!best) return '';
-  return String(best.formatted_address || '')
+  const osm = osmAddress_(la, lo);
+  if (osm.house) return osm.text;
+  const google = googleAddresses_(la, lo);
+  const withHouse = google.find(a => /\d/.test(a.replace(/,?\s*Алматы.*$/, '')));
+  // Без номера дома: улица из OpenStreetMap или Google, номер агент допишет сам
+  return withHouse || osm.text || google[0] || '';
+}
+
+/** OpenStreetMap: улица, дом, город. Сервис может не ответить — тогда остаётся Google. */
+function osmAddress_(lat, lon) {
+  try {
+    const res = UrlFetchApp.fetch('https://nominatim.openstreetmap.org/reverse?format=jsonv2&accept-language=ru&zoom=18&addressdetails=1&lat=' + lat + '&lon=' + lon, { muteHttpExceptions: true });
+    const a = JSON.parse(res.getContentText()).address || {};
+    if (!a.road) return { text: '', house: false };
+    const place = a.city || a.town || a.village || a.suburb || '';
+    return { text: [a.road, a.house_number, place].filter(Boolean).join(', '), house: !!a.house_number };
+  } catch (e) {
+    return { text: '', house: false };
+  }
+}
+
+/** Google: только настоящие адреса и улицы. Плюс-коды («7RVJ+R69») и остановки в адрес не попадают. */
+function googleAddresses_(lat, lon) {
+  const plusCode = /^[23456789CFGHJMPQRVWX]{2,8}\+[23456789CFGHJMPQRVWX]{2,3}(,\s*|\s+)/;
+  const clean = (s) => String(s || '').replace(plusCode, '')
     .replace(/,?\s*Казахстан\s*$/i, '').replace(/,?\s*\b\d{6}\b/g, '').trim();
+  try {
+    const r = Maps.newGeocoder().setLanguage('ru').setRegion('kz').reverseGeocode(lat, lon);
+    const isAddress = (x) => (x.types || []).some(t => t === 'street_address' || t === 'premise' || t === 'subpremise' || t === 'route');
+    return (r.results || []).filter(isAddress).map(x => clean(x.formatted_address)).filter(a => a && !plusCode.test(a));
+  } catch (e) {
+    return [];
+  }
 }
 
 /* ---------------- Местоположение сотрудников ----------------

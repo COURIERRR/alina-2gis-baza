@@ -1462,7 +1462,9 @@
       if (location.hash !== hash) return;
       btn.disabled = false;
       if (address) f.elements.address.value = address;
-      info.textContent = address ? coords + (geo.acc > 100 ? '. Проверьте адрес: точность низкая' : '') : coords + '. Адрес не определился — введите вручную';
+      info.textContent = !address ? coords + '. Адрес не определился — введите вручную'
+        : !/\d/.test(address) ? coords + '. Номер дома не определился — допишите его'
+        : coords + (geo.acc > 100 ? '. Проверьте адрес: точность низкая' : '');
       saveDraft();
     };
     f.onsubmit = async (ev) => {
