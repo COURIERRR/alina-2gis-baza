@@ -40,7 +40,7 @@ const CLOSED_COLOR = '#f8d7da';
 // Ежедневный отчёт на почту. Адрес получателя — в свойствах скрипта (меню таблицы), не в репозитории
 const REPORT_SUBJECT = 'Отчёт МТ с приложения';
 const REPORT_HOUR = 16;
-const REPORT_FOLDER = 'Отчёты МТ';
+const APP_URL = 'https://courierrr.github.io/alina-2gis-baza/';
 
 // Колонки листов «Маршрут N» (визиты, по строке на визит)
 const RESULT_FIELDS = [
@@ -395,6 +395,7 @@ function doPost(e) {
       case 'pointReopen': return withLock_(() => pointReopen_(me, body.id));
       case 'report': requireManager_(me); return { report: cached_('report:' + body.date, 300, () => dayReport_(String(body.date))) };
       case 'reportSend': requireManager_(me); return reportSend_(me.name, String(body.date));
+      case 'reportXlsx': requireManager_(me); return reportXlsx_(String(body.date));
       case 'addrAt': return { address: addrAt_(body.lat, body.lon) };
       case 'pos': return pos_(me, body.geo); // без блокировки и сброса кэша: приходит часто и данных точек не меняет
       case 'positions': requireManager_(me); return { positions: positions_() };
@@ -1408,10 +1409,10 @@ function dayReport_(date) {
   const by = {};
   const ag = (name) => {
     const k = nameKey_(name);
-    return by[k] || (by[k] = { name: String(name), goal: 0, start: '', end: '', startPos: null, visits: 0, newPoints: 0, repeat: 0,
+    return by[k] || (by[k] = { name: String(name), role: ROLE_AGENT, goal: 0, start: '', end: '', startPos: null, visits: 0, newPoints: 0, repeat: 0,
       far: 0, noGps: 0, closed: 0, added: 0, issued: 0, taken: 0, done: 0, first: '', last: '', items: [] });
   };
-  staff_().filter(s => s.status !== ST_BLOCKED).forEach(s => ag(s.name));
+  staff_().filter(s => s.status !== ST_BLOCKED).forEach(s => { ag(s.name).role = s.role; });
 
   const dsh = daySheet_();
   const dLast = dsh.getLastRow();
@@ -1420,7 +1421,9 @@ function dayReport_(date) {
       Object.assign(ag(r[D.agent]), dayOut_(r), { startPos: parseGps_(r[D.startGps]) });
     });
 
-  const visits = allVisits_().filter(v => v.agent && inDay(v.t));
+  const allVisitRows = allVisits_();
+  const prevVisits = allVisitRows.filter(v => v.agent && v.t >= from - 86400000 && v.t < from).length;
+  const visits = allVisitRows.filter(v => v.agent && inDay(v.t));
   visits.sort((a, b) => a.t - b.t);
   visits.forEach(v => {
     const a = ag(v.agent);
@@ -1496,25 +1499,21 @@ function dayReport_(date) {
     akb: { total: rsum('total'), done: rsum('done'), work: rsum('work'), free: rsum('free'), closed: rsum('closed') },
   };
   out.active = !!(out.totals.visits || closed.length || added.length || tasks.length);
+  out.prevVisits = prevVisits;
+  out.goal = sum('goal');
+  // Точки с высоким интересом: кому и что делать дальше
+  out.hot = [];
+  agents.forEach(a => a.items.forEach((i, idx) => {
+    if (i.interest === 'Высокий') out.hot.push({ agent: a.name, idx, name: i.name, address: i.address, contact: i.contact, phone: i.phone, nextStep: i.nextStep, nextDate: i.nextDate });
+  }));
+  // Что требует внимания, простыми словами. Без визитов считаем только агентов, руководители в этом списке не нужны
+  const idle = agents.filter(a => a.role !== ROLE_MANAGER && !a.visits && !a.closed && !a.added).map(a => a.name);
+  out.attention = [];
+  if (out.active && idle.length) out.attention.push('Без визитов: ' + idle.join(', '));
+  agents.filter(a => a.far).forEach(a => out.attention.push(a.name + ': дальше ' + FAR_METERS + ' м от точки — ' + a.far));
+  agents.filter(a => a.noGps).forEach(a => out.attention.push(a.name + ': без GPS — ' + a.noGps));
+  if (closed.length) out.attention.push('Отмечены нерабочими: ' + closed.length);
   return out;
-}
-
-/** Исходные строки анкет за день — для листа «Анкеты полностью». */
-function dayVisitsRaw_(date) {
-  const from = Utilities.parseDate(date + ' 00:00', TZ, 'yyyy-MM-dd HH:mm').getTime();
-  return allVisits_().filter(v => v.agent && v.t >= from && v.t < from + 86400000).sort((a, b) => a.t - b.t);
-}
-
-function dayLog_(date) {
-  const from = Utilities.parseDate(date + ' 00:00', TZ, 'yyyy-MM-dd HH:mm').getTime();
-  const sh = logSheet_();
-  const last = sh.getLastRow();
-  if (last < 2) return [];
-  const n = Math.min(last - 1, 5000);
-  return sh.getRange(last - n + 1, 1, n, LOG_HEADER.length).getValues().filter(r => {
-    const t = parseTime_(r[0]);
-    return t >= from && t < from + 86400000;
-  });
 }
 
 /** Лист отчёта: columns — [заголовок, ширина, тип]; тип 'n' — число, 'f' — формула, иначе текст. */
@@ -1541,79 +1540,52 @@ function reportSheet_(ss, title, columns, rows, opts) {
   return sh;
 }
 
+/** Простой Excel по кнопке: итог дня и точки. Полные анкеты остаются в отчёте приложения и в листах «Маршрут N». */
 function buildReportBlob_(date) {
   const rep = dayReport_(date);
   const ss = SpreadsheetApp.create('Отчёт МТ ' + rep.label);
   const fileId = ss.getId();
   try {
     ss.setSpreadsheetTimeZone(TZ);
-    const dur = (a) => {
-      const s = parseTime_(a.start), e = parseTime_(a.end);
-      if (!s || !e) return '';
-      const m = Math.max(0, Math.round((e - s) / 60000));
-      return Math.floor(m / 60) + ' ч ' + (m % 60) + ' мин';
-    };
     const tm = (iso) => { const t = parseTime_(iso); return t ? hmIn_(t) : ''; };
+    const remarks = (a) => [a.far ? 'далеко от точки: ' + a.far : '', a.noGps ? 'без GPS: ' + a.noGps : '', a.visits ? '' : 'без визитов'].filter(Boolean).join(', ');
+    const hotOf = (a) => a.items.filter(i => i.interest === 'Высокий').length;
+    const people = rep.agents.filter(a => a.visits || a.closed || a.added || a.role !== ROLE_MANAGER);
 
-    // Сводка: шапка с АКБ, затем строка на сотрудника и итог
-    const summary = ss.getSheets()[0];
-    summary.setName('Сводка');
-    const active = rep.akb.total - rep.akb.closed;
-    const pct = active ? Math.round(rep.akb.done / active * 1000) / 10 : 0;
-    summary.getRange(1, 1, 3, 1).setValues([['Отчёт МТ за ' + rep.label],
-      ['АКБ на момент отчёта: выполнено ' + rep.akb.done + ' из ' + active + ' рабочих точек (' + String(pct).replace('.', ',') + '%) · в работе ' + rep.akb.work +
-        ' · свободно ' + rep.akb.free + ' · не работают ' + rep.akb.closed + ' · загружено всего ' + rep.akb.total],
-      ['За день: посещено точек ' + rep.totals.visits + ' (новых ' + rep.totals.newPoints + ', повторных ' + rep.totals.repeat + ') · нерабочих отмечено ' + rep.totals.closed +
-        ' · новых адресов ' + rep.totals.added + ' · заданий выполнено ' + rep.totals.done]]);
-    summary.getRange(1, 1).setFontWeight('bold').setFontSize(14);
-    const sumRows = rep.agents.map(a => [a.name, tm(a.start), tm(a.end), dur(a), a.goal || '', a.visits, a.newPoints, a.repeat, a.first, a.last,
-      a.far, a.noGps, a.closed, a.added, a.issued, a.taken, a.done]);
-    reportSheet_(ss, 'Сводка', [['Сотрудник', 190], ['Начал день', 70], ['Закончил день', 70], ['Рабочий день', 90], ['Цель, точек', 60, 'n'],
-      ['Посещено точек', 75, 'n'], ['Новые', 60, 'n'], ['Повторные', 75, 'n'], ['Первый визит', 70], ['Последний визит', 75],
-      ['Далеко от точки (>' + FAR_METERS + ' м)', 90, 'n'], ['Без GPS', 60, 'n'], ['Отметил нерабочими', 85, 'n'], ['Добавил адресов', 75, 'n'],
-      ['Заданий выдал', 70, 'n'], ['Заданий взял', 70, 'n'], ['Заданий выполнил', 80, 'n']], sumRows, { sheet: summary, top: 5 });
-    if (sumRows.length) {
-      const t = rep.totals;
-      summary.getRange(6 + sumRows.length, 1, 1, 17).setValues([['ИТОГО', '', '', '', '', t.visits, t.newPoints, t.repeat, '', '', t.far, t.noGps, t.closed, t.added, t.issued, t.taken, t.done]])
-        .setFontWeight('bold').setBackground('#e8ecf7');
-    }
+    const first = ss.getSheets()[0];
+    first.getRange(1, 1, 2, 1).setValues([['Отчёт МТ за ' + rep.label],
+      ['Посещено точек: ' + rep.totals.visits + (rep.goal ? ' из ' + rep.goal : '') + ' · вчера: ' + rep.prevVisits +
+        ' · нерабочих отмечено: ' + rep.totals.closed + ' · новых адресов: ' + rep.totals.added]]);
+    first.getRange(1, 1).setFontWeight('bold').setFontSize(14);
+    reportSheet_(ss, 'Итог дня', [['Сотрудник', 200], ['Начал', 60], ['Закончил', 70], ['Цель', 55, 'n'], ['Посещено', 75, 'n'], ['% цели', 60, 'n'],
+      ['Новые', 60, 'n'], ['Высокий интерес', 75, 'n'], ['Нерабочие', 75, 'n'], ['Замечания', 240]],
+      people.map(a => [a.name, tm(a.start), tm(a.end), a.goal || '', a.visits, a.goal ? Math.round(a.visits / a.goal * 100) : '',
+        a.newPoints, hotOf(a), a.closed, remarks(a)]), { sheet: first, top: 4 });
 
-    // Визиты: кто, куда, откуда, когда, по сотрудникам по порядку
-    const photoCell = (urls) => urls.length ? '=HYPERLINK("' + urls[0] + '","Фото (' + urls.length + ')")' : '';
-    const visitRows = [];
-    const farCells = [];
+    const rows = [];
+    const marks = [];
     rep.agents.forEach(a => a.items.forEach(i => {
-      visitRows.push([a.name, rep.label, i.time, i.route, i.n, i.name, i.type, i.address, i.visit, i.from, i.fromMin == null ? '' : i.fromMin, i.fromKm == null ? '' : i.fromKm,
-        i.distance == null ? '' : i.distance, i.gps, i.alina, i.contact, i.position, i.phone, i.whatsapp, i.assortment, i.competitors, i.ourBrands,
-        i.interest, i.nextStep, i.nextDate, i.comment, i.score === '' ? '' : Number(i.score) || '', photoCell(i.photos)]);
-      if (i.far || !i.gps) farCells.push(visitRows.length);
+      const note = [i.far ? i.distance + ' м от точки' : '', i.gps ? '' : 'без GPS', i.visit > 1 ? 'визит ' + i.visit : ''].filter(Boolean).join(', ');
+      rows.push([a.name, i.time, i.name, i.address, i.contact, i.phone, i.alina, i.interest, i.nextStep, note,
+        i.photos.length ? '=HYPERLINK("' + i.photos[0] + '","Фото (' + i.photos.length + ')")' : '']);
+      marks.push(i);
     }));
-    const vs = reportSheet_(ss, 'Визиты', [['Сотрудник', 170], ['Дата', 80], ['Время', 55], ['Маршрут', 60, 'n'], ['№ точки', 55, 'n'], ['Точка', 190], ['Тип', 150], ['Адрес', 260],
-      ['Визит №', 55, 'n'], ['Откуда приехал', 170], ['Минут с прошлой точки', 75, 'n'], ['Км по прямой от прошлой', 75, 'n'], ['До точки при отправке, м', 80, 'n'], ['GPS сотрудника', 170],
-      ['Работаем / не работаем', 95], ['Контактное лицо', 130], ['Должность', 110], ['Телефон', 120], ['WhatsApp', 120], ['Ассортимент', 210], ['Конкуренты', 190], ['Наши бренды', 150],
-      ['Интерес', 75], ['Итог / следующий шаг', 230], ['Дата след. шага', 85], ['Комментарий', 220], ['Баллы ТТ', 60, 'n'], ['Фото', 70, 'f']], visitRows);
-    farCells.forEach(r => vs.getRange(r + 1, 13, 1, 2).setBackground('#ffe2b8'));
+    const vs = reportSheet_(ss, 'Точки', [['Сотрудник', 170], ['Время', 55], ['Точка', 190], ['Адрес', 260], ['Контакт', 130], ['Телефон', 120],
+      ['Работаем?', 90], ['Интерес', 75], ['Следующий шаг', 240], ['Замечание', 150], ['Фото', 70, 'f']], rows);
+    marks.forEach((i, n) => {
+      if (i.interest === 'Высокий') vs.getRange(n + 2, 8).setBackground('#d6f2df');
+      if (i.far || !i.gps) vs.getRange(n + 2, 10).setBackground('#ffe2b8');
+    });
 
-    // Анкеты полностью: все поля за день
-    const rawCols = RESULT_FIELDS.filter(f => f[0] !== 'uid' && f[0] !== 'n').map(f => [f[1], f[2] === 'num' ? 75 : 130, f[2] === 'num' ? 'n' : '']);
-    const rawRows = dayVisitsRaw_(date).map(v => RESULT_FIELDS.filter(f => f[0] !== 'uid' && f[0] !== 'n').map(f => {
-      const val = v[f[0]] == null ? '' : v[f[0]];
-      return f[2] === 'num' ? toNum_(val) : String(val);
-    }));
-    reportSheet_(ss, 'Анкеты полностью', rawCols, rawRows);
-
-    const cs = reportSheet_(ss, 'Нерабочие точки', [['Время', 55], ['Кто отметил', 170], ['Маршрут', 60, 'n'], ['№ точки', 55, 'n'], ['Точка', 190], ['Адрес', 260], ['Причина', 160], ['Комментарий', 220], ['GPS', 170]],
-      rep.closed.map(c => [c.time, c.by, c.route, c.n, c.name, c.address, c.reason, c.note, c.gps]));
-    if (rep.closed.length) cs.getRange(2, 1, rep.closed.length, 9).setBackground(CLOSED_COLOR);
-
-    reportSheet_(ss, 'Новые адреса', [['Время', 55], ['Кто добавил', 170], ['Точка', 190], ['Тип', 150], ['Адрес', 260], ['Телефон', 120], ['Статус', 90]],
-      rep.added.map(c => [c.time, c.by, c.name, c.type, c.address, c.phone, c.status]));
-
-    reportSheet_(ss, 'Задания', [['Точка', 190], ['Адрес', 240], ['Задание', 260], ['Комментарий', 200], ['Срок', 85], ['Статус', 85], ['Выдал', 150], ['Выдано в', 60], ['Исполнитель', 150], ['Взято в', 60], ['Выполнено в', 70], ['Результат', 220]],
-      rep.tasks.map(t => [t.name, t.address, t.type, t.comment, t.due, t.status, t.author, t.created, t.assignee, t.taken, t.done, t.result]));
-
-    reportSheet_(ss, 'Хронология', [['Время', 55], ['Сотрудник', 170], ['Действие', 170], ['id точки', 80], ['Подробности', 420]],
-      dayLog_(date).map(r => [hmIn_(parseTime_(r[0])), String(r[1]), String(r[2]), String(r[3]), String(r[4])]));
+    if (rep.closed.length) {
+      const cs = reportSheet_(ss, 'Нерабочие точки', [['Время', 55], ['Кто отметил', 170], ['Точка', 190], ['Адрес', 260], ['Причина', 160], ['Комментарий', 220]],
+        rep.closed.map(c => [c.time, c.by, c.name, c.address, c.reason, c.note]));
+      cs.getRange(2, 1, rep.closed.length, 6).setBackground(CLOSED_COLOR);
+    }
+    if (rep.added.length) {
+      reportSheet_(ss, 'Новые адреса', [['Время', 55], ['Кто добавил', 170], ['Точка', 190], ['Тип', 150], ['Адрес', 260], ['Телефон', 120]],
+        rep.added.map(c => [c.time, c.by, c.name, c.type, c.address, c.phone]));
+    }
 
     SpreadsheetApp.flush();
     const res = UrlFetchApp.fetch('https://docs.google.com/spreadsheets/d/' + fileId + '/export?format=xlsx',
@@ -1625,27 +1597,42 @@ function buildReportBlob_(date) {
   }
 }
 
-function archiveReport_(blob) {
-  const folder = subFolder_(DriveApp.getRootFolder(), REPORT_FOLDER);
-  const same = folder.getFilesByName(blob.getName());
-  while (same.hasNext()) same.next().setTrashed(true);
-  folder.createFile(blob);
+function reportXlsx_(date) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) fail_('Неверная дата');
+  const { blob } = buildReportBlob_(date);
+  return { name: blob.getName(), data: Utilities.base64Encode(blob.getBytes()) };
+}
+
+/** Текст письма: итог дня, что требует внимания и кнопка на страницу отчёта. Письмо без вложения. */
+function reportMail_(rep) {
+  const h = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const link = APP_URL + '#/report/' + rep.date;
+  const head = 'Посещено точек: ' + rep.totals.visits + (rep.goal ? ' из ' + rep.goal : '') + ' · вчера: ' + rep.prevVisits;
+  const people = rep.agents.filter(a => a.visits || a.closed || a.added);
+  const line = (a) => a.name + ': ' + a.visits + (a.goal ? ' из ' + a.goal : '') + ' точек';
+  const body = 'Отчёт МТ за ' + rep.label + '\n\n' + head + '\n\n' +
+    (people.length ? people.map(line).join('\n') + '\n\n' : '') +
+    (rep.attention.length ? 'Требует внимания:\n' + rep.attention.map(x => '· ' + x).join('\n') + '\n\n' : '') +
+    'Открыть отчёт: ' + link;
+  const htmlBody = '<div style="font:15px/1.5 -apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#1d1d1f;max-width:560px">' +
+    '<h2 style="margin:0 0 4px;font-size:20px">Отчёт МТ за ' + h(rep.label) + '</h2>' +
+    '<p style="margin:0 0 16px;color:#555">' + h(head) + '</p>' +
+    (people.length ? '<table style="border-collapse:collapse;width:100%;margin-bottom:16px">' + people.map(a =>
+      '<tr><td style="padding:6px 0;border-top:1px solid #e5e5ea">' + h(a.name) + '</td>' +
+      '<td style="padding:6px 0;border-top:1px solid #e5e5ea;text-align:right;white-space:nowrap"><b>' + a.visits + '</b>' + (a.goal ? ' из ' + a.goal : '') + '</td></tr>').join('') + '</table>' : '') +
+    (rep.attention.length ? '<div style="background:#fff4e5;border-radius:10px;padding:12px 14px;margin-bottom:16px"><b>Требует внимания</b><br>' +
+      rep.attention.map(h).join('<br>') + '</div>' : '') +
+    '<a href="' + h(link) + '" style="display:inline-block;background:#2a3b7e;color:#fff;text-decoration:none;padding:12px 20px;border-radius:10px;font-weight:600">Открыть отчёт</a>' +
+    '<p style="margin:12px 0 0;color:#888;font-size:13px">Откроется после входа по PIN руководителя.</p></div>';
+  return { body, htmlBody };
 }
 
 function mailReport_(date) {
   const to = PropertiesService.getScriptProperties().getProperty('REPORT_TO');
   if (!to) fail_('Не задан адрес отчёта (меню таблицы «' + MENU + ' → Адрес для ежедневного отчёта»)');
-  const { rep, blob } = buildReportBlob_(date);
-  archiveReport_(blob);
-  const t = rep.totals;
-  const worked = rep.agents.filter(a => a.visits || a.closed || a.added);
-  const body = 'Отчёт МТ за ' + rep.label + '\n\n' +
-    'Посещено точек: ' + t.visits + ' (новых ' + t.newPoints + ', повторных ' + t.repeat + ')\n' +
-    'Отмечено нерабочими: ' + t.closed + '\nДобавлено новых адресов: ' + t.added + '\nЗаданий выполнено: ' + t.done + '\n\n' +
-    (worked.length ? 'По сотрудникам:\n' + worked.map(a => '· ' + a.name + ': ' + a.visits + ' точек' +
-      (a.closed ? ', нерабочих ' + a.closed : '') + (a.added ? ', новых адресов ' + a.added : '')).join('\n') + '\n\n' : '') +
-    'Подробности — во вложении.';
-  MailApp.sendEmail({ to, subject: REPORT_SUBJECT, body, attachments: [blob], name: 'Alina Sales' });
+  const rep = dayReport_(date);
+  const m = reportMail_(rep);
+  MailApp.sendEmail({ to, subject: REPORT_SUBJECT, body: m.body, htmlBody: m.htmlBody, name: 'Alina Sales' });
   return { rep, to };
 }
 

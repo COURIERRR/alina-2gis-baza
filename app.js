@@ -237,6 +237,7 @@
       pointReopen: (id) => post('pointReopen', { id }).then((d) => d.point),
       report: (date) => post('report', { date }).then((d) => d.report),
       reportSend: (date) => post('reportSend', { date }),
+      reportXlsx: (date) => post('reportXlsx', { date }),
       addrAt: (lat, lon) => post('addrAt', { lat, lon }).then((d) => d.address),
       pos: (geo, keepalive) => post('pos', { geo }, keepalive),
       positions: () => post('positions', {}).then((d) => d.positions),
@@ -391,9 +392,9 @@
         const pts = await all();
         const isDay = (iso) => iso && ymd(new Date(iso)) === date;
         const by = {};
-        const ag = (name) => by[name] || (by[name] = { name, goal: 0, start: '', end: '', visits: 0, newPoints: 0, repeat: 0, far: 0, noGps: 0, closed: 0, added: 0,
+        const ag = (name) => by[name] || (by[name] = { name, role: 'агент', goal: 0, start: '', end: '', visits: 0, newPoints: 0, repeat: 0, far: 0, noGps: 0, closed: 0, added: 0,
           issued: 0, taken: 0, done: 0, first: '', last: '', items: [], closedItems: [], addedItems: [] });
-        staffDb().forEach((s) => ag(s.name));
+        staffDb().forEach((s) => { ag(s.name).role = s.role; });
         results().filter((r) => isDay(r.time)).forEach((r) => {
           const a = ag(r.agent);
           const p = pts.find((x) => x.id === r.id) || {};
@@ -407,18 +408,23 @@
           a.items.push({ id: r.id, route: p.route, n: p.n, name: p.name, type: p.type, address: p.address, time: hm(r.time), t, visit: r.visit || 1,
             gps: r.gps ? 'GPS' : '', distance: r.distance === '' || r.distance == null ? null : r.distance, far: r.distance > FAR_METERS,
             from: prev ? prev.name : '', fromMin: prev ? Math.round((t - prev.t) / 60000) : null, fromKm: null, interest: r.form.interest, nextStep: r.form.nextStep,
-            photos: [], sections: [{ title: 'Анкета', fields }] });
+            contact: r.form.contact, phone: r.form.phone, photos: [], sections: [{ title: 'Анкета', fields }] });
         });
         const closed = pts.filter((p) => p.status === 'закрыта' && isDay(state()[p.id].closedAt)).map((p) => ({ id: p.id, route: p.route, n: p.n, name: p.name, address: p.address,
           reason: p.closedReason, note: p.closedNote, by: p.closedBy, time: hm(state()[p.id].closedAt) }));
         closed.forEach((c) => { const a = ag(c.by); a.closed++; a.closedItems.push(c); });
         const agents = Object.values(by).sort((a, b) => b.visits - a.visits || a.name.localeCompare(b.name));
         const sum = (k) => agents.reduce((s, a) => s + a[k], 0);
-        return wait({ date, label: date.split('-').reverse().join('.'), agents, closed, added: [], tasks: [], active: !!(sum('visits') || closed.length),
+        const hot = [];
+        agents.forEach((a) => a.items.forEach((i, idx) => { if (i.interest === 'Высокий') hot.push({ agent: a.name, idx, name: i.name, address: i.address, contact: i.contact, phone: i.phone, nextStep: i.nextStep, nextDate: '' }); }));
+        const idle = agents.filter((a) => a.role !== ROLE_MANAGER && !a.visits && !a.closed).map((a) => a.name);
+        const attention = (idle.length ? ['Без визитов: ' + idle.join(', ')] : []).concat(closed.length ? ['Отмечены нерабочими: ' + closed.length] : []);
+        return wait({ date, label: date.split('-').reverse().join('.'), agents, closed, added: [], tasks: [], hot, attention, prevVisits: 0, goal: sum('goal'), active: !!(sum('visits') || closed.length),
           totals: { visits: sum('visits'), newPoints: sum('newPoints'), repeat: sum('repeat'), far: sum('far'), noGps: sum('noGps'), closed: closed.length, added: 0, issued: 0, taken: 0, done: 0 },
           akb: { total: pts.length, done: pts.filter((p) => p.status === 'выполнена').length, work: 0, free: 0, closed: pts.filter((p) => p.status === 'закрыта').length } });
       },
       reportSend: () => wait({ sent: true, to: 'демо-адрес' }),
+      reportXlsx: () => wait({ name: 'Отчёт демо.xlsx', data: btoa('demo') }),
       addrAt: () => wait('Алматы, демо-адрес по геолокации'),
       pos: (geo) => {
         const db = store.get('mock:pos', {});
@@ -822,10 +828,12 @@
     if (!unlocked) return lockView();
     startTracking();
     const h = location.hash.replace(/^#\/?/, '');
+    document.body.classList.toggle('wide', /^(report|rv\/)/.test(h));
     let m;
     if (h === 'add') return addView();
     if (h === 'closed') return closedView();
-    if (h === 'report') return reportView();
+    const repLink = h.match(/^report(?:\/(\d{4}-\d{2}-\d{2}))?$/);
+    if (repLink) { if (repLink[1]) ui.repDate = repLink[1]; return reportView(); }
     if ((m = h.match(/^rv\/(\d{4}-\d{2}-\d{2})\/([^/]+)\/(\d+)$/))) return reportVisitView(m[1], decodeURIComponent(m[2]), Number(m[3]));
     if ((m = h.match(/^r\/(\d+)$/))) return listView(Number(m[1]));
     if ((m = h.match(/^map\/(\d+)$/))) return mapView(Number(m[1]));
@@ -1006,6 +1014,11 @@
     $('other').onclick = () => { Object.assign(a, { step: 'name', pin1: '' }); loginView(); };
   }
 
+  // После входа — на главную; ссылка на отчёт из письма остаётся открытой
+  function afterLogin() {
+    if (!/^#\/(report|rv\/)/.test(location.hash)) location.hash = '#/';
+  }
+
   async function finishLogin(s, pin) {
     me.agent = s.name; me.role = s.role; me.token = s.token;
     store.set('agent', s.name); store.set('lastAgent', s.name); store.set('role', s.role); store.set('token', s.token);
@@ -1018,7 +1031,7 @@
     prefetchedAt = 0;
     prefetch();
     if (!faceIdOn() && faceIdOk && !store.get('faceid:skip:' + s.name, false)) return faceIdOffer();
-    location.hash = '#/';
+    afterLogin();
     route();
     flushOutbox();
   }
@@ -1033,7 +1046,7 @@
         <button class="btn primary" id="fon">Включить Face ID</button>
         <button class="link-btn" id="foff">Не сейчас</button>
       </div>`;
-    const done = () => { location.hash = '#/'; route(); flushOutbox(); };
+    const done = () => { afterLogin(); route(); flushOutbox(); };
     $('fon').onclick = async () => {
       try { await faceIdEnable(); toast('Face ID включён'); } catch (e) { toast('Не получилось включить Face ID', true); }
       done();
@@ -2308,86 +2321,100 @@
     refreshTimer = setInterval(show, 60000);
   }
 
-  /* ---------- Отчёт за день (руководитель) ---------- */
+  /* ---------- Отчёт за день (руководитель) ----------
+   * Страница, на которую ведёт ссылка из письма: сверху главное, подробности раскрываются по нажатию. */
   function reportView() {
     if (!isManager()) { location.hash = '#/'; return; }
     setBar('Отчёт за день', '#/stats');
     const hash = location.hash;
     if (!ui.repDate) ui.repDate = today();
-    const tile = (v, label, bad) => `<div class="tile${bad && v ? ' bad' : ''}"><b>${v}</b><span>${label}</span></div>`;
-    const km1 = (v) => String(v).replace('.', ',');
-    const fromLine = (i) => {
-      const parts = [i.from ? 'Откуда: ' + esc(i.from) : ''];
-      if (i.fromMin != null) parts.push(i.fromMin + ' мин');
-      if (i.fromKm != null) parts.push(km1(i.fromKm) + ' км по прямой');
-      return parts.filter(Boolean).join(' · ');
-    };
+    const open = ui.repOpen || (ui.repOpen = {});
     const interestClass = { 'Высокий': 'done', 'Средний': 'info', 'Низкий': 'work', 'Отказ': 'bad' };
-    const visitRow = (a, i, idx) => `<a class="row-item" href="#/rv/${ui.repDate}/${encodeURIComponent(a.name)}/${idx}">
-      <span class="grow"><div class="name">${esc(i.time)} · ${esc(i.name)}</div>
-        <div class="addr">${esc(cleanAddr(i.address || ''))}</div>
-        ${fromLine(i) ? `<div class="muted" style="font-size:13px">${fromLine(i)}</div>` : ''}
-        ${i.interest ? `<span class="badge ${interestClass[i.interest] || ''}">${esc(i.interest)}</span>` : ''}
-        ${i.visit > 1 ? `<span class="badge info">визит ${i.visit}</span>` : ''}
-        ${i.far ? `<span class="badge bad">${esc(i.distance)} м от точки</span>` : ''}
-        ${!i.gps ? '<span class="badge work">без GPS</span>' : ''}
-        ${i.photos.length ? `<span class="badge">фото ${i.photos.length}</span>` : ''}</span>${chev}</a>`;
-    const closedRows = (list, withWho) => `<div class="list">${list.map((c) => `<a class="row-item point closed" href="#/p/${esc(c.id)}">
-      <span class="grow"><div class="name">${esc(c.time)} · ${esc(c.name)}</div><div class="addr">${esc(cleanAddr(c.address))}</div>
-        <span class="badge bad">${esc(c.reason)}</span>${withWho ? `<span class="badge">${esc(c.by)}</span>` : ''}
-        ${c.note ? `<div class="muted" style="font-size:13px">${esc(c.note)}</div>` : ''}</span>${chev}</a>`).join('')}</div>`;
-    const addedRows = (list, withWho) => `<div class="list">${list.map((c) => `<a class="row-item" href="#/p/${esc(c.id)}">
-      <span class="grow"><div class="name">${esc(c.time)} · ${esc(c.name)}</div><div class="addr">${esc(c.address)}</div>
-        ${withWho ? `<span class="badge">${esc(c.by)}</span>` : ''}</span>${chev}</a>`).join('')}</div>`;
-    const taskRows = (list) => `<div class="card">${list.map((t) => `<div class="todo"><b>${esc(t.name)}</b> <span class="badge">${esc(t.status)}</span>
-      <div class="muted">${esc(t.type)}${t.author ? ' · выдал(а) ' + esc(t.author) : ''}${t.assignee ? ' · исполнитель ' + esc(t.assignee) : ''}</div>
-      ${t.result ? `<div>${esc(t.result)}</div>` : ''}</div>`).join('')}</div>`;
+    const dayTitle = (d) => {
+      const s = new Date(d + 'T12:00:00').toLocaleDateString('ru-RU', { weekday: 'long', day: 'numeric', month: 'long' });
+      return s[0].toUpperCase() + s.slice(1);
+    };
+    const kpi = (label, value, sub, cls) => `<div class="tile"><span>${label}</span><b>${value}</b>${sub ? `<small class="${cls || ''}">${sub}</small>` : ''}</div>`;
+    const visitHref = (who, idx) => `#/rv/${ui.repDate}/${encodeURIComponent(who)}/${idx}`;
+    const visitRow = (a, i, idx) => {
+      const details = [cleanAddr(i.address || ''), i.contact, i.nextStep].filter(Boolean).map(esc).join(' · ');
+      return `<a class="rep-visit" href="${visitHref(a.name, idx)}">
+        <span class="rep-time">${esc(i.time)}</span>
+        <span class="grow"><b>${esc(i.name)}</b><span class="rep-sub">${details}</span>
+          ${i.far ? `<span class="badge bad">${esc(i.distance)} м от точки</span>` : ''}${!i.gps ? '<span class="badge work">без GPS</span>' : ''}
+          ${i.visit > 1 ? `<span class="badge info">визит ${i.visit}</span>` : ''}${i.photos.length ? `<span class="badge">фото ${i.photos.length}</span>` : ''}</span>
+        ${i.interest ? `<span class="badge ${interestClass[i.interest] || ''}">${esc(i.interest)}</span>` : ''}</a>`;
+    };
+    const closedRow = (c, withWho) => `<a class="rep-visit" href="#/p/${esc(c.id)}">
+      <span class="rep-time">${esc(c.time)}</span>
+      <span class="grow"><b>${esc(c.name)}</b><span class="rep-sub">${[cleanAddr(c.address), withWho ? c.by : '', c.note].filter(Boolean).map(esc).join(' · ')}</span></span>
+      <span class="badge bad">${esc(c.reason)}</span></a>`;
+    const addedRow = (c, withWho) => `<a class="rep-visit" href="#/p/${esc(c.id)}">
+      <span class="rep-time">${esc(c.time)}</span>
+      <span class="grow"><b>${esc(c.name)}</b><span class="rep-sub">${[c.address, withWho ? c.by : ''].filter(Boolean).map(esc).join(' · ')}</span></span>
+      <span class="badge info">новый адрес</span></a>`;
+    const agentBlock = (a, forced) => {
+      const pct = a.goal ? Math.min(100, Math.round(a.visits / a.goal * 100)) : 0;
+      const empty = !a.items.length && !a.closedItems.length && !a.addedItems.length;
+      const meta = [a.start ? dayText(a) : 'день не начат', a.visits ? 'новых ' + a.newPoints + ', повторных ' + a.repeat : '',
+        a.closed ? 'нерабочих ' + a.closed : '', a.added ? 'адресов ' + a.added : ''].filter(Boolean).join(' · ');
+      const head = `<span class="rep-who"><b>${esc(a.name)}</b><span class="${a.visits ? '' : 'bad-text'}">${a.visits}${a.goal ? ' из ' + a.goal : ''}</span></span>
+        ${a.goal ? `<span class="goal-bar small${pct >= 100 ? ' full' : ''}" style="display:block"><span style="display:block;height:100%;width:${pct}%;background:var(--accent)"></span></span>` : ''}
+        <span class="rep-sub">${esc(meta)}${a.far ? ` · <span class="bad-text">далеко ${a.far}</span>` : ''}${a.noGps ? ` · <span class="bad-text">без GPS ${a.noGps}</span>` : ''}</span>`;
+      if (empty) return `<div class="rep-agent idle">${head}</div>`;
+      return `<details class="rep-agent" data-agent="${esc(a.name)}"${forced || open[a.name] ? ' open' : ''}><summary>${head}</summary>
+        ${a.items.map((i, idx) => visitRow(a, i, idx)).join('')}
+        ${a.closedItems.map((c) => closedRow(c)).join('')}${a.addedItems.map((c) => addedRow(c)).join('')}</details>`;
+    };
 
     const render = (r) => {
       if (location.hash !== hash) return;
       const who = r && r.agents.some((a) => a.name === ui.repWho) ? ui.repWho : '';
       const person = who ? r.agents.find((a) => a.name === who) : null;
-      const t = person || (r && r.totals);
-      const worked = r ? r.agents.filter((a) => a.visits || a.closed || a.added || a.issued || a.done) : [];
-      const idle = r ? r.agents.filter((a) => worked.indexOf(a) < 0) : [];
-      const tasks = r ? (person ? r.tasks.filter((x) => x.author === who || x.assignee === who) : r.tasks) : [];
+      let body = '<div class="spinner">Собираем отчёт…</div>';
+      if (r) {
+        const staff = r.agents.filter((a) => a.role !== ROLE_MANAGER || a.visits);
+        const out = staff.filter((a) => a.visits || a.closed || a.added).length;
+        const active = r.akb.total - r.akb.closed;
+        const akbPct = active ? String(Math.round(r.akb.done / active * 1000) / 10).replace('.', ',') : '0';
+        const hot = person ? r.hot.filter((h) => h.agent === who) : r.hot;
+        const list = person ? [person] : staff;
+        const tiles = person ? kpi('Посещено точек', person.visits + (person.goal ? ` <em>из ${person.goal}</em>` : ''), person.first ? esc(person.first) + '–' + esc(person.last) : esc(dayText(person)))
+            + kpi('Новые', person.newPoints, 'повторных ' + person.repeat)
+            + kpi('Высокий интерес', hot.length, hot.length ? 'ждут следующего шага' : '')
+            + kpi('Замечания', person.far + person.noGps, person.far + person.noGps ? `далеко ${person.far}, без GPS ${person.noGps}` : 'нет', person.far + person.noGps ? 'bad-text' : '')
+          : kpi('Посещено точек', r.totals.visits + (r.goal ? ` <em>из ${r.goal}</em>` : ''), 'вчера ' + r.prevVisits)
+            + kpi('Вышли на работу', out + ` <em>из ${staff.length}</em>`, staff.length - out ? 'без визитов ' + (staff.length - out) : 'все на маршруте', staff.length - out ? 'bad-text' : '')
+            + kpi('Высокий интерес', hot.length, hot.length ? 'ждут следующего шага' : '')
+            + kpi('АКБ', akbPct + '%', r.akb.done + ' из ' + active + ' рабочих');
+        body = `
+          <div class="tiles rep-tiles">${tiles}</div>
+          ${!person && r.attention.length ? `<div class="attention"><b>Требует внимания</b>${r.attention.map((x) => `<div>${esc(x)}</div>`).join('')}</div>` : ''}
+          ${hot.length ? `<div class="section-title">Высокий интерес</div><div class="card rep-list">${hot.map((h) => `<a class="rep-visit" href="${visitHref(h.agent, h.idx)}">
+            <span class="grow"><b>${esc(h.name)}</b><span class="rep-sub">${[h.contact, h.phone, h.nextStep, person ? '' : h.agent].filter(Boolean).map(esc).join(' · ')}</span></span>
+            ${h.nextDate ? `<span class="badge info">${esc(fmtDue(h.nextDate))}</span>` : ''}</a>`).join('')}</div>` : ''}
+          <div class="section-title">${person ? 'Точки по порядку' : 'Сотрудники'}</div>
+          <div class="card rep-list">${list.map((a) => agentBlock(a, !!person)).join('') || '<div class="muted">За этот день данных нет</div>'}</div>
+          ${!person && r.closed.length ? `<div class="section-title">Отмечены нерабочими</div><div class="card rep-list">${r.closed.map((c) => closedRow(c, true)).join('')}</div>` : ''}
+          ${!person && r.added.length ? `<div class="section-title">Новые адреса</div><div class="card rep-list">${r.added.map((c) => addedRow(c, true)).join('')}</div>` : ''}
+          <div class="rep-actions">
+            <button class="btn" id="repXlsx">Скачать Excel</button>
+            <button class="btn ghost" id="repSend">Отправить письмо</button>
+          </div>`;
+      }
       $app.innerHTML = `
-        <div class="date-nav">
-          <button class="btn small" id="repPrev" aria-label="Предыдущий день">‹</button>
-          <div class="field" style="margin:0"><input type="date" id="repDate" max="${today()}" value="${ui.repDate}"></div>
-          <button class="btn small" id="repNext" aria-label="Следующий день"${ui.repDate >= today() ? ' disabled' : ''}>›</button>
-        </div>
-        <div class="field"><span class="label">Ответственный</span><select id="repWho">
-          <option value="">Все сотрудники</option>
-          ${r ? r.agents.map((a) => `<option value="${esc(a.name)}"${a.name === who ? ' selected' : ''}>${esc(a.name)} (${a.visits})</option>`).join('') : ''}
-        </select></div>
-        ${!r ? '<div class="spinner">Собираем отчёт…</div>' : `
-        ${person ? `<div class="card"><h3>${esc(person.name)}</h3>
-            <div class="muted">${esc(dayText(person))}${person.goal ? ' · цель ' + person.goal + ' точек' : ''}</div>
-            ${person.first ? `<div class="muted">Первый визит ${esc(person.first)}, последний ${esc(person.last)}</div>` : ''}
-            <a href="#/me/${encodeURIComponent(person.name)}">Кабинет сотрудника ›</a></div>` : ''}
-        <div class="tiles">
-          ${tile(t.visits, 'посещено точек')}${tile(t.newPoints, 'новых')}${tile(t.repeat, 'повторных')}${tile(t.closed, 'отмечено нерабочими', true)}
-          ${tile(t.far, 'далеко от точки', true)}${tile(t.noGps, 'без GPS')}${tile(t.added, 'новых адресов')}${tile(t.done, 'заданий выполнено')}
-        </div>
-        ${person ? `<div class="section-title">Точки по порядку</div>
-          ${person.items.length ? `<div class="list">${person.items.map((i, idx) => visitRow(person, i, idx)).join('')}</div>` : '<div class="empty">Визитов за этот день нет</div>'}
-          ${person.closedItems.length ? '<div class="section-title">Отметил нерабочими</div>' + closedRows(person.closedItems) : ''}
-          ${person.addedItems.length ? '<div class="section-title">Добавил адреса</div>' + addedRows(person.addedItems) : ''}`
-        : `<div class="section-title">Сотрудники</div>
-          ${worked.length ? `<div class="list">${worked.map((a) => `<button class="row-item" data-who="${esc(a.name)}" style="text-align:left">
-            <span class="grow"><div class="name">${esc(a.name)}</div>
-              <div class="muted" style="font-size:13px">${esc(dayText(a))}</div>
-              <div class="muted" style="font-size:13px">Точек ${a.visits} · новых ${a.newPoints} · повторных ${a.repeat}${a.first ? ' · ' + esc(a.first) + '–' + esc(a.last) : ''}</div>
-              ${a.closed ? `<span class="badge bad">нерабочих ${a.closed}</span>` : ''}${a.far ? `<span class="badge bad">далеко ${a.far}</span>` : ''}
-              ${a.noGps ? `<span class="badge work">без GPS ${a.noGps}</span>` : ''}${a.added ? `<span class="badge info">адресов ${a.added}</span>` : ''}</span>${chev}</button>`).join('')}</div>`
-            : '<div class="empty">За этот день никто ничего не заполнял</div>'}
-          ${idle.length ? `<div class="section-title">Без визитов</div><div class="card muted">${idle.map((a) => esc(a.name)).join(', ')}</div>` : ''}
-          ${r.closed.length ? '<div class="section-title">Отмечены нерабочими</div>' + closedRows(r.closed, true) : ''}
-          ${r.added.length ? '<div class="section-title">Новые адреса</div>' + addedRows(r.added, true) : ''}`}
-        ${tasks.length ? '<div class="section-title">Задания</div>' + taskRows(tasks) : ''}
-        <div class="muted" style="text-align:center;font-size:13px;margin:12px 0 8px">АКБ сейчас: выполнено ${r.akb.done} из ${r.akb.total - r.akb.closed}${r.akb.closed ? ' · не работают ' + r.akb.closed : ''}</div>
-        <button class="btn" id="repSend">Отправить отчёт за ${esc(r.label)} на почту</button>`}`;
+        <h2 class="rep-title">${esc(dayTitle(ui.repDate))}</h2>
+        <div class="rep-controls">
+          <div class="date-nav">
+            <button class="btn small" id="repPrev" aria-label="Предыдущий день">‹</button>
+            <div class="field" style="margin:0"><input type="date" id="repDate" max="${today()}" value="${ui.repDate}"></div>
+            <button class="btn small" id="repNext" aria-label="Следующий день"${ui.repDate >= today() ? ' disabled' : ''}>›</button>
+          </div>
+          <div class="field" style="margin:0"><select id="repWho" aria-label="Ответственный">
+            <option value="">Все сотрудники</option>
+            ${r ? r.agents.filter((a) => a.role !== ROLE_MANAGER || a.visits).map((a) => `<option value="${esc(a.name)}"${a.name === who ? ' selected' : ''}>${esc(a.name)} (${a.visits})</option>`).join('') : ''}
+          </select></div>
+        </div>${body}`;
 
       const setDate = (d) => { ui.repDate = d; show(); };
       const shift = (n) => { const d = new Date(ui.repDate + 'T12:00:00'); d.setDate(d.getDate() + n); setDate(ymd(d)); };
@@ -2395,22 +2422,42 @@
       $('repNext').onclick = () => shift(1);
       $('repDate').onchange = (ev) => { if (ev.target.value) setDate(ev.target.value); };
       $('repWho').onchange = (ev) => { ui.repWho = ev.target.value; render(r); window.scrollTo(0, 0); };
-      $app.querySelectorAll('[data-who]').forEach((b) => {
-        b.onclick = () => { ui.repWho = b.dataset.who; render(r); window.scrollTo(0, 0); };
+      // Раскрытые сотрудники остаются раскрытыми при обновлении страницы
+      $app.querySelectorAll('details.rep-agent').forEach((el) => {
+        el.ontoggle = () => { if (!person) open[el.dataset.agent] = el.open; };
       });
-      if ($('repSend')) $('repSend').onclick = async (ev) => {
-        if (!confirm('Отправить отчёт за ' + r.label + ' на почту?')) return;
+      if ($('repXlsx')) $('repXlsx').onclick = async (ev) => {
         const btn = ev.currentTarget;
         btn.disabled = true;
-        btn.textContent = 'Собираем и отправляем…';
+        btn.textContent = 'Собираем файл…';
+        try {
+          const f = await api.reportXlsx(r.date);
+          const bytes = Uint8Array.from(atob(f.data), (c) => c.charCodeAt(0));
+          const url = URL.createObjectURL(new Blob([bytes], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = f.name;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          setTimeout(() => URL.revokeObjectURL(url), 60000);
+        } catch (e) { toast(e.server ? e.message : 'Нет связи', true); }
+        btn.disabled = false;
+        btn.textContent = 'Скачать Excel';
+      };
+      if ($('repSend')) $('repSend').onclick = async (ev) => {
+        if (!confirm('Отправить письмо с отчётом за ' + r.label + '?')) return;
+        const btn = ev.currentTarget;
+        btn.disabled = true;
+        btn.textContent = 'Отправляем…';
         try {
           const res = await api.reportSend(r.date);
-          toast('Отчёт отправлен: ' + res.to);
-          btn.textContent = 'Отчёт отправлен';
+          toast('Письмо отправлено: ' + res.to);
+          btn.textContent = 'Письмо отправлено';
         } catch (e) {
           toast(e.server ? e.message : 'Нет связи', true);
           btn.disabled = false;
-          btn.textContent = 'Отправить отчёт за ' + r.label + ' на почту';
+          btn.textContent = 'Отправить письмо';
         }
       };
     };
