@@ -741,6 +741,8 @@
     users: icon('<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c.4-3.6 3.2-5.5 6.5-5.5s6.1 1.9 6.5 5.5"/><path d="M15.5 4.8a3.5 3.5 0 0 1 0 6.4M17.5 14.8c2.2.6 3.7 2.4 4 5.2"/>'),
     closed: icon('<circle cx="12" cy="12" r="9"/><path d="m5.7 5.7 12.6 12.6"/>'),
     report: icon('<path d="M6 3.5h9l4 4V20a.5.5 0 0 1-.5.5h-12A.5.5 0 0 1 6 20z"/><path d="M15 3.5V8h4M9 12.5h6M9 16h6"/>'),
+    book: icon('<path d="M12 6.5C10.5 5 8 4.5 4 4.5v14c4 0 6.5 .5 8 2 1.5-1.5 4-2 8-2v-14c-4 0-6.5 .5-8 2z"/><path d="M12 6.5v14"/>'),
+    share: icon('<path d="M12 15V3.5M8 7l4-4 4 4"/><path d="M7 11H5.5A1.5 1.5 0 0 0 4 12.5v7A1.5 1.5 0 0 0 5.5 21h13a1.5 1.5 0 0 0 1.5-1.5v-7a1.5 1.5 0 0 0-1.5-1.5H17"/>'),
     chev: icon('<path d="m9 5 7 7-7 7"/>', 'chev'),
   };
   const chev = I.chev;
@@ -783,8 +785,8 @@
     const tb = $('tabbar');
     const authed = !!(me.token && unlocked);
     const h = location.hash.replace(/^#\/?/, '');
-    // У мастера заявки свои кнопки внизу, поэтому на этом экране панели вкладок нет
-    const shown = authed && !/^zayavki/.test(h);
+    // У мастера заявки и у просмотра каталога свои кнопки внизу: панели вкладок там нет
+    const shown = authed && !/^(zayavki|catalog\/)/.test(h);
     tb.hidden = !shown;
     document.body.classList.toggle('has-tabbar', shown);
     if (!shown) return;
@@ -809,6 +811,7 @@
     stopRefresh();
     updateBanner();
     hideZayavki();
+    closeCatalog();
     window.scrollTo(0, 0);
     if (!me.token || !unlocked) { stopTracking(); hideNearby(); }
     if (!me.token) return loginView();
@@ -835,6 +838,8 @@
     if (h === 'teammap') return teamMapView();
     if (h === 'zones') return zonesView();
     if (h === 'banners') return bannersView();
+    if (h === 'catalogs') return catalogsView();
+    if ((m = h.match(/^catalog\/([\w-]+)$/))) return catalogView(m[1]);
     if ((m = h.match(/^zayavki(?:\/(R\d+-\d+))?$/))) return zayavkiView(m[1]);
     return homeView();
   }
@@ -1250,6 +1255,9 @@
         <a class="row-item has-icon" href="#/zayavki"><span class="ri-icon" style="background:var(--accent-2)">${I.banner}</span>
           <span class="grow"><span class="ri-title">Заявки на баннеры</span>
             <span class="ri-sub" style="display:block">Дизайн и изготовление</span></span>${chev}</a>
+        <a class="row-item has-icon" href="#/catalogs"><span class="ri-icon" style="background:var(--accent-2)">${I.book}</span>
+          <span class="grow"><span class="ri-title">Каталоги продукции</span>
+            <span class="ri-sub" style="display:block">НАШИ, AlinEX, FAWORI, V-tech</span></span>${chev}</a>
       </div>`;
     };
     const render = (routes) => {
@@ -2753,6 +2761,330 @@
   }
 
   /* ---------- Карты (Leaflet + OpenStreetMap, подгружаются только здесь) ---------- */
+  /* ---------- Каталоги продукции ---------- */
+  // Чтобы заменить каталог: положить файл в catalogs/, обновить pages и size, увеличить v.
+  const CATALOGS = [
+    { id: 'nashi', title: 'НАШИ', file: 'nashi.pdf', pages: 27, size: 2353122, v: 1 },
+    { id: 'alinex', title: 'AlinEX', file: 'alinex.pdf', pages: 42, size: 3854874, v: 1 },
+    { id: 'fawori', title: 'FAWORI', file: 'fawori.pdf', pages: 4, size: 445310, v: 1 },
+    { id: 'v-tech', title: 'V-tech', file: 'v-tech.pdf', pages: 16, size: 9486977, v: 1 },
+    { id: 'alina-group', title: 'Общий каталог', file: 'alina-group.pdf', pages: 39, size: 7192472, v: 1, common: true,
+      note: 'В том числе NORMA, Alina Paint, Decorex, G-ex' },
+  ];
+  const CAT_CACHE = 'alina-catalogs'; // то же имя в sw.js: обновление приложения этот кэш не стирает
+  const PDFJS_V = '3.11.174';
+  const catUrl = (c) => new URL('catalogs/' + c.file + '?v=' + c.v, location.href).href;
+  const catMb = (bytes) => (bytes / 1048576).toFixed(1).replace('.', ',');
+
+  function loadPdfjs() {
+    if (window.pdfjsLib) return Promise.resolve();
+    if (!loadPdfjs.p) {
+      loadPdfjs.p = new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = 'vendor/pdfjs/pdf.min.js?v=' + PDFJS_V;
+        s.onload = () => {
+          window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'vendor/pdfjs/pdf.worker.min.js?v=' + PDFJS_V;
+          resolve();
+        };
+        s.onerror = () => { loadPdfjs.p = null; s.remove(); reject(new Error('Просмотр каталогов не загрузился. Проверьте связь.')); };
+        document.head.appendChild(s);
+      });
+    }
+    return loadPdfjs.p;
+  }
+
+  async function openCatCache() {
+    try { return window.caches ? await caches.open(CAT_CACHE) : null; } catch (e) { return null; }
+  }
+
+  // Открытый один раз каталог остаётся на телефоне и потом открывается без связи
+  async function catalogBlob(c, onProgress) {
+    const url = catUrl(c);
+    const cache_ = await openCatCache();
+    const hit = cache_ && await cache_.match(url);
+    if (hit) return hit.blob();
+    let res;
+    try { res = await fetch(url); } catch (e) { res = null; }
+    if (!res || !res.ok) throw new Error('Каталог не загрузился. Для первого открытия нужна связь.');
+    const chunks = [];
+    if (res.body && res.body.getReader) {
+      const reader = res.body.getReader();
+      let got = 0;
+      for (;;) {
+        const r = await reader.read();
+        if (r.done) break;
+        chunks.push(r.value);
+        got += r.value.length;
+        onProgress(Math.min(got, c.size));
+      }
+    } else {
+      chunks.push(await res.blob());
+    }
+    const blob = new Blob(chunks, { type: 'application/pdf' });
+    if (cache_) {
+      try { await cache_.put(url, new Response(blob, { headers: { 'Content-Type': 'application/pdf' } })); } catch (e) { /* нет места — покажем без сохранения */ }
+    }
+    return blob;
+  }
+
+  function catalogsView() {
+    setBar('Каталоги', '#/');
+    hideNearby();
+    const row = (c) => `<a class="row-item has-icon" href="#/catalog/${c.id}"><span class="ri-icon">${I.book}</span>
+      <span class="grow"><span class="ri-title">${esc(c.title)}</span>
+        ${c.note ? `<span class="ri-sub" style="display:block">${esc(c.note)}</span>` : ''}
+        <span class="ri-sub" style="display:block">${c.pages} стр. · ${catMb(c.size)} МБ<span data-saved="${c.id}"></span></span></span>${chev}</a>`;
+    $app.innerHTML = '<div class="section-title">Бренды</div><div class="list">' + CATALOGS.filter((c) => !c.common).map(row).join('') + '</div>' +
+      '<div class="section-title">Все бренды Alina Group</div><div class="list">' + CATALOGS.filter((c) => c.common).map(row).join('') + '</div>';
+    markSavedCatalogs();
+    loadPdfjs().catch(() => {}); // первое открытие каталога будет быстрее
+  }
+
+  // Отметка «на телефоне»; заодно убираем старые версии заменённых каталогов
+  async function markSavedCatalogs() {
+    const cache_ = await openCatCache();
+    if (!cache_) return;
+    const current = CATALOGS.map(catUrl);
+    const keys = await cache_.keys();
+    keys.forEach((k) => {
+      if (/\/catalogs\/[^/]+\.pdf/.test(k.url) && !current.includes(k.url)) cache_.delete(k);
+    });
+    CATALOGS.forEach((c) => {
+      if (!keys.some((k) => k.url === catUrl(c))) return;
+      const el = document.querySelector('[data-saved="' + c.id + '"]');
+      if (el) el.textContent = ' · на телефоне';
+    });
+  }
+
+  let catOpen = null;
+  function closeCatalog() {
+    if (catOpen) { catOpen.close(); catOpen = null; }
+    const w = $('catview');
+    if (w) w.remove();
+  }
+
+  function placeCatview() {
+    const wrap = $('catview');
+    if (!wrap) return;
+    const b = $('banner');
+    const bar = document.querySelector('.bar').getBoundingClientRect().bottom;
+    wrap.style.top = (b.hidden ? bar : b.getBoundingClientRect().bottom) + 'px';
+  }
+  window.addEventListener('resize', placeCatview);
+
+  async function catalogView(id) {
+    const c = CATALOGS.find((x) => x.id === id);
+    if (!c) { location.hash = '#/catalogs'; return; }
+    const state = { closed: false, task: null, stop: null };
+    state.close = () => {
+      state.closed = true;
+      if (state.stop) state.stop();
+      if (state.task) state.task.destroy();
+    };
+    catOpen = state;
+    setBar(c.title, '#/catalogs');
+    hideNearby();
+    $app.innerHTML = '';
+    const wrap = document.createElement('div');
+    wrap.id = 'catview';
+    wrap.className = 'catview';
+    wrap.innerHTML = `<div class="cat-load"><p id="catMsg">Открываем каталог…</p>
+      <div class="cat-progress"><i id="catBar"></i></div></div>`;
+    document.body.appendChild(wrap);
+    document.body.classList.add('in-frame');
+    placeCatview();
+    try {
+      const blob = await catalogBlob(c, (got) => {
+        if (state.closed) return;
+        $('catMsg').textContent = 'Загрузка ' + catMb(got) + ' из ' + catMb(c.size) + ' МБ';
+        $('catBar').style.width = Math.round(got / c.size * 100) + '%';
+      });
+      if (state.closed) return;
+      await loadPdfjs();
+      if (state.closed) return;
+      const data = await new Response(blob).arrayBuffer();
+      if (state.closed) return;
+      state.task = window.pdfjsLib.getDocument({ data, isEvalSupported: false });
+      const doc = await state.task.promise;
+      if (state.closed) return;
+      const pages = await Promise.all(Array.from({ length: doc.numPages }, (_, i) => doc.getPage(i + 1)));
+      if (state.closed) return;
+      catalogPages(wrap, state, c, pages, blob);
+    } catch (e) {
+      if (state.closed) return;
+      closeCatalog();
+      document.body.classList.remove('in-frame');
+      catOpen = null;
+      showError(/связ/.test(e.message || '') ? e : new Error('Каталог не открылся. Попробуйте ещё раз.'), route);
+    }
+  }
+
+  // Страницы рисуются только рядом с видимой областью, дальние освобождаются:
+  // иначе большой каталог не помещается в память iPhone.
+  function catalogPages(wrap, state, c, pages, blob) {
+    const ZOOMS = [1, 1.5, 2, 3];
+    const GAP = 8;
+    const MAX_PIXELS = 8e6;
+    const sizes = pages.map((p) => p.getViewport({ scale: 1 }));
+    wrap.innerHTML = `<div class="cat-scroll" id="catScroll"><div class="cat-pages" id="catPages">
+        ${pages.map((_, i) => `<div class="cat-page" data-i="${i}"><span>${i + 1}</span></div>`).join('')}
+      </div></div>
+      <div class="cat-tools">
+        <button id="catOut" aria-label="Уменьшить">−</button>
+        <span class="cat-num" id="catNum">1 / ${pages.length}</span>
+        <button id="catIn" aria-label="Увеличить">+</button>
+        <button id="catShare" aria-label="Поделиться">${I.share}</button>
+      </div>`;
+    const scroller = $('catScroll');
+    const box = $('catPages');
+    const slots = Array.from(box.children);
+    const rendered = new Map(); // номер страницы → масштаб, с которым она нарисована
+    const wanted = new Set();
+    let zoom = 0;
+    let cur = 0;
+    let busy = null; // { i, task }
+    let width = 0;
+    let zoomTimer = null;
+
+    function layout() {
+      width = scroller.clientWidth;
+      const w = Math.max(100, width - GAP * 2) * ZOOMS[zoom];
+      box.style.width = w + 'px';
+      slots.forEach((s, i) => {
+        s.style.width = w + 'px';
+        s.style.height = Math.round(w * sizes[i].height / sizes[i].width) + 'px';
+      });
+    }
+
+    function nextPage() {
+      let best = -1;
+      wanted.forEach((i) => {
+        if (rendered.get(i) === ZOOMS[zoom]) return;
+        if (best < 0 || Math.abs(i - cur) < Math.abs(best - cur)) best = i;
+      });
+      return best;
+    }
+
+    async function pump() {
+      if (busy || state.closed) return;
+      const i = nextPage();
+      if (i < 0) return;
+      const z = ZOOMS[zoom];
+      let scale = (slots[i].clientWidth / sizes[i].width) * Math.max(window.devicePixelRatio || 1, 2);
+      const pixels = sizes[i].width * sizes[i].height * scale * scale;
+      if (pixels > MAX_PIXELS) scale *= Math.sqrt(MAX_PIXELS / pixels);
+      const vp = pages[i].getViewport({ scale });
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.floor(vp.width);
+      canvas.height = Math.floor(vp.height);
+      const task = pages[i].render({ canvasContext: canvas.getContext('2d'), viewport: vp });
+      busy = { i, task };
+      let ok = true;
+      try { await task.promise; } catch (e) { ok = false; }
+      busy = null;
+      if (state.closed) { canvas.width = 0; return; }
+      if (ok && wanted.has(i)) {
+        const old = slots[i].querySelector('canvas');
+        if (old) { old.replaceWith(canvas); old.width = 0; } else slots[i].appendChild(canvas);
+        rendered.set(i, z);
+      } else {
+        canvas.width = 0;
+        if (!ok && wanted.has(i)) rendered.set(i, z); // страница не нарисовалась: не повторяем без конца
+      }
+      pump();
+    }
+
+    function release(i) {
+      wanted.delete(i);
+      if (busy && busy.i === i) busy.task.cancel();
+      const old = slots[i].querySelector('canvas');
+      if (old) { old.width = 0; old.remove(); }
+      rendered.delete(i);
+      if (!busy || busy.i !== i) pages[i].cleanup();
+    }
+
+    const io = new IntersectionObserver((entries) => {
+      entries.forEach((e) => {
+        const i = Number(e.target.dataset.i);
+        if (e.isIntersecting) wanted.add(i); else release(i);
+      });
+      pump();
+    }, { root: scroller, rootMargin: '100% 0px' });
+    slots.forEach((s) => io.observe(s));
+
+    let ticking = false;
+    function updateNum() {
+      ticking = false;
+      if (state.closed) return;
+      const mid = scroller.scrollTop + scroller.clientHeight / 2;
+      let n = 0;
+      for (let i = 0; i < slots.length; i++) {
+        if (slots[i].offsetTop <= mid) n = i; else break;
+      }
+      if (n !== cur) {
+        cur = n;
+        $('catNum').textContent = (cur + 1) + ' / ' + pages.length;
+      }
+    }
+    const onScroll_ = () => { if (!ticking) { ticking = true; requestAnimationFrame(updateNum); } };
+    scroller.addEventListener('scroll', onScroll_, { passive: true });
+
+    function setZoom(next) {
+      if (next < 0 || next >= ZOOMS.length || next === zoom) return;
+      const y = (scroller.scrollTop + scroller.clientHeight / 2) / scroller.scrollHeight;
+      const x = (scroller.scrollLeft + scroller.clientWidth / 2) / scroller.scrollWidth;
+      zoom = next;
+      layout();
+      scroller.scrollTop = y * scroller.scrollHeight - scroller.clientHeight / 2;
+      scroller.scrollLeft = x * scroller.scrollWidth - scroller.clientWidth / 2;
+      $('catOut').disabled = zoom === 0;
+      $('catIn').disabled = zoom === ZOOMS.length - 1;
+      // Пока рисуется чёткая версия, видна растянутая прежняя
+      clearTimeout(zoomTimer);
+      zoomTimer = setTimeout(pump, 200);
+    }
+    $('catOut').onclick = () => setZoom(zoom - 1);
+    $('catIn').onclick = () => setZoom(zoom + 1);
+    $('catOut').disabled = true;
+    $('catShare').onclick = () => shareCatalog(c, blob);
+
+    const onResize = () => {
+      if (scroller.clientWidth === width) return; // жест двумя пальцами ширину не меняет
+      layout();
+      rendered.clear();
+      pump();
+    };
+    window.addEventListener('resize', onResize);
+
+    state.stop = () => {
+      clearTimeout(zoomTimer);
+      io.disconnect();
+      window.removeEventListener('resize', onResize);
+      scroller.removeEventListener('scroll', onScroll_);
+      if (busy) busy.task.cancel();
+      slots.forEach((s) => { const old = s.querySelector('canvas'); if (old) old.width = 0; });
+    };
+    layout();
+  }
+
+  async function shareCatalog(c, blob) {
+    const link = catUrl(c);
+    const name = c.common ? 'Каталог Alina Group' : 'Каталог ' + c.title;
+    try {
+      const file = new File([blob], name + '.pdf', { type: 'application/pdf' });
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share({ files: [file] });
+      } else if (navigator.share) {
+        await navigator.share({ title: name, url: link });
+      } else {
+        await navigator.clipboard.writeText(link);
+        toast('Ссылка на каталог скопирована');
+      }
+    } catch (e) {
+      if (e.name !== 'AbortError') toast('Не удалось поделиться каталогом', true);
+    }
+  }
+
   function loadLeaflet() {
     if (window.L) return Promise.resolve();
     if (!loadLeaflet.p) {
