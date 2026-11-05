@@ -124,23 +124,10 @@
 
   /* ---------- 2ГИС ---------- */
   const hasCoords = (p) => p.lat != null && p.lon != null && p.acc !== 'нет';
-  // Маршрут по координатам — только для точного адреса, иначе через поиск фирмы в 2ГИС
-  const routable = (p) => hasCoords(p) && p.acc === 'точно';
-  // Своя ссылка 2ГИС точки (если есть) открывает её карточку напрямую
-  const gisSearchUrl = (p) => p.gis || ('https://2gis.kz/almaty/search/' + encodeURIComponent(p.name + ', ' + cleanAddr(p.address)));
-  const gisRouteWebUrl = (p) => routable(p)
-    ? 'https://2gis.kz/almaty/directions/points/%7C' + p.lon + '%2C' + p.lat
-    : gisSearchUrl(p);
-
-  function openRoute(p) {
-    if (!routable(p)) { location.href = gisSearchUrl(p); return; }
-    // Приложение 2ГИС: маршрут от текущего местоположения. Если приложения нет — сайт.
-    const started = Date.now();
-    location.href = 'dgis://2gis.ru/routeSearch/rsType/car/to/' + p.lon + ',' + p.lat;
-    setTimeout(() => {
-      if (!document.hidden && Date.now() - started < 3000) location.href = gisRouteWebUrl(p);
-    }, 1500);
-  }
+  // Кнопка «2ГИС»: карточка фирмы; точка, добавленная агентом с места, — по её координатам; иначе поиск по названию и адресу
+  const gisUrl = (p) => p.gis
+    || (p.added && hasCoords(p) ? 'https://2gis.kz/geo/' + p.lon + ',' + p.lat : '')
+    || ('https://2gis.kz/almaty/search/' + encodeURIComponent(p.name + ', ' + cleanAddr(p.address)));
 
   /* ---------- Задания: общие функции ---------- */
   const isOpen = (t) => t.status === 'новое' || t.status === 'в работе';
@@ -1736,12 +1723,11 @@
         <div class="sub-label">Доля в продажах, %</div>
         <div class="num-grid">${parts.map((x) => num(x[0], x[1], totalKey)).join('')}</div>${sum(totalKey)}
         ${brands.map((x) => `<div class="sub-label">${esc(x[1])}: доли брендов, %</div>${nums(x[0], x[2], x[0])}${sum(x[0])}`).join('')}</div>`;
-      // Быстрые действия, как в «Контактах» iPhone: маршрут, звонок, WhatsApp, карточка 2ГИС
+      // Быстрые действия, как в «Контактах» iPhone: 2ГИС, звонок, WhatsApp
       const quick = [
-        `<button class="qa main" id="go">${I.car}<span>Маршрут</span></button>`,
+        `<a class="qa main" href="${esc(gisUrl(p))}" target="_blank" rel="noopener">${I.pin}<span>2ГИС</span></a>`,
         p.phone ? `<a class="qa" href="tel:${esc(telDigits(p.phone))}">${I.phone}<span>Позвонить</span></a>` : '',
         waUrl(p.whatsapp) ? `<a class="qa" href="${waUrl(p.whatsapp)}" target="_blank" rel="noopener">${I.chat}<span>WhatsApp</span></a>` : '',
-        `<a class="qa" href="${gisSearchUrl(p)}" target="_blank" rel="noopener">${I.pin}<span>2ГИС</span></a>`,
       ].join('');
       $app.innerHTML = `
         <div class="card point-head">
@@ -1750,7 +1736,6 @@
           <div class="addr">${esc(p.address)}</div>
           ${p.phone ? `<div class="addr">${esc(p.phone)}</div>` : ''}
           <div class="quick">${quick}</div>
-          ${routable(p) ? '' : '<div class="muted" style="font-size:13px">«Маршрут» откроет карточку фирмы в 2ГИС — нажмите там «Проехать».</div>'}
           ${status}
           ${!done && !other && !pending && !closed ? (mine
             ? '<button class="btn ghost" id="release">Отказаться от точки</button>'
@@ -1836,7 +1821,6 @@
           ${editing || revisit ? '<button class="btn ghost" type="button" id="cancelEdit" style="margin-top:8px">Отмена</button>' : ''}
         </form>` : ''}`;
 
-      $('go').onclick = () => openRoute(p);
       if ($('claim')) $('claim').onclick = (ev) => act(ev.target, () => api.claim(id), 'Точка ваша');
       if ($('release')) $('release').onclick = (ev) => {
         if (confirm('Вернуть точку в свободные?')) act(ev.target, () => api.release(id), 'Точка освобождена');
