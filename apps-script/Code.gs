@@ -623,11 +623,6 @@ function pointAdd_(agent, f) {
   const row = [id, route, n, name, String(f.type || '').trim(), address,
     has ? lat : '', has ? lon : '', has ? 'точно' : '', ST_FREE, '', '', '',
     String(f.phone || '').trim(), '', '', '', '', agent, '', '', '', '', '', new Date(), '', ''];
-  // При включённых зонах новая точка сразу попадает в ближайший район — маршрутов остаётся 6
-  if (zonesOn_() && has) {
-    const z = nearestZone_(lat, lon);
-    if (z) { row[P.zone] = z; row[P.zoneN] = values.reduce((m, r) => Number(r[P.zone]) === z ? Math.max(m, Number(r[P.zoneN]) || 0) : m, 0) + 1; }
-  }
   const range = sh.getRange(sh.getLastRow() + 1, 1, 1, POINTS_HEADER.length);
   range.offset(0, P.phone, 1, 2).setNumberFormat('@');
   range.setValues([row]);
@@ -1733,7 +1728,8 @@ function zonesOn_() {
   return zonesOnMemo_;
 }
 // Точка без зоны остаётся в своём старом маршруте — при включении ничего не пропадёт
-const effRoute_ = (row) => zonesOn_() && Number(row[P.zone]) ? Number(row[P.zone]) : Number(row[P.route]);
+// Точка, добавленная агентом (колонка «Добавил»), в районы не входит: она всегда в разделе «Новые точки»
+const effRoute_ = (row) => zonesOn_() && !row[P.added] && Number(row[P.zone]) ? Number(row[P.zone]) : Number(row[P.route]);
 
 const zoneXY_ = (p) => ({ x: p.lon * 81.1, y: p.lat * 111 }); // км; для широты Алматы
 const dist2_ = (a, b) => (a.x - b.x) ** 2 + (a.y - b.y) ** 2;
@@ -1812,8 +1808,8 @@ function zonesBuild_() {
   if (zonesOn_()) fail_('Новые маршруты уже включены — сначала верните старые');
   const { sh, values } = allPoints_();
   const pts = values.map((row, i) => {
-    const has = row[P.lat] !== '' && row[P.lon] !== '';
-    const p = { i, acc: String(row[P.acc] || ''), key: streetKey_(row[P.address]), zone: 0,
+    const has = row[P.lat] !== '' && row[P.lon] !== '' && !row[P.added];
+    const p = { i, acc: row[P.added] ? '' : String(row[P.acc] || ''), key: row[P.added] ? '' : streetKey_(row[P.address]), zone: 0,
       lat: has ? Number(row[P.lat]) : null, lon: has ? Number(row[P.lon]) : null };
     return has ? Object.assign(p, zoneXY_(p)) : p;
   });
@@ -1866,7 +1862,7 @@ function zonesPreview_() {
   const stored = JSON.parse(props.getProperty('ZONE_TITLES') || '{}');
   const titles = [];
   for (let z = 1; z <= ZONES; z++) titles.push(stored[z] || '');
-  const rows = allPoints_().values;
+  const rows = allPoints_().values.filter(row => !row[P.added]);
   return {
     on: zonesOn_(), built: rows.some(row => Number(row[P.zone]) > 0), titles,
     points: rows.map(row => ({
@@ -1981,10 +1977,10 @@ function zonesEnable_(agent, on) {
   const rows = allPoints_().values;
   if (on && !rows.some(row => Number(row[P.zone]) > 0)) fail_('Сначала рассчитайте черновик');
   if (on) {
-    // Точки, добавленные с места после расчёта, — в ближайшую зону
+    // Точки без зоны после расчёта — в ближайшую; добавленные агентами остаются в «Новых точках»
     const sh = pointsSheet_();
     rows.forEach((row, i) => {
-      if (Number(row[P.zone]) || row[P.lat] === '' || row[P.lon] === '') return;
+      if (row[P.added] || Number(row[P.zone]) || row[P.lat] === '' || row[P.lon] === '') return;
       const z = nearestZone_(Number(row[P.lat]), Number(row[P.lon]));
       if (!z) return;
       const n = rows.reduce((m, r) => Number(r[P.zone]) === z ? Math.max(m, Number(r[P.zoneN]) || 0) : m, 0) + 1;

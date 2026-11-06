@@ -1231,7 +1231,7 @@
       const list = allCachedPoints().filter((p) => p.status === 'закрыта');
       $app.innerHTML = list.length ? '<div class="list">' + list.map((p) => `<a class="row-item point closed" href="#/p/${p.id}">
           <span class="num">${p.n}</span>
-          <span class="grow"><div class="name">${esc(p.name)}</div><div class="addr">Маршрут ${p.route} · ${esc(cleanAddr(p.address))}</div>
+          <span class="grow"><div class="name">${esc(p.name)}</div><div class="addr">${esc(routeName(p.route))} · ${esc(cleanAddr(p.address))}</div>
             <span class="badge bad">${esc(p.closedReason)}</span><div class="muted" style="font-size:13px">${esc(p.closedBy)} · ${esc(p.closedAt)}${p.closedNote ? ' · ' + esc(p.closedNote) : ''}</div></span>${chev}</a>`).join('') + '</div>'
         : '<div class="empty">Нерабочих точек нет</div>';
     };
@@ -1268,8 +1268,8 @@
           const pd = active ? (r.done / active) * 100 : 0;
           const pw = active ? (r.work / active) * 100 : 0;
           return `<a class="row-item" href="#/r/${r.route}">
-            <span class="grow"><span class="ri-title">Маршрут ${r.route}</span>
-              ${r.title ? `<span class="ri-sub" style="display:block">${esc(r.title)}</span>` : ''}
+            <span class="grow"><span class="ri-title">${esc(routeName(r.route))}</span>
+              ${r.title && r.title !== NEW_POINTS ? `<span class="ri-sub" style="display:block">${esc(r.title)}</span>` : ''}
               <span class="progress" style="display:flex"><span class="done" style="width:${pd}%"></span><span class="work" style="width:${pw}%"></span></span>
               <span class="ri-sub">Выполнено ${r.done} из ${active}${r.work ? ' · в работе ' + r.work : ''}${r.closed ? ` · <span style="color:var(--bad)">не работают ${r.closed}</span>` : ''}</span></span>
             ${chev}</a>`;
@@ -1299,8 +1299,13 @@
   }
   const cachedPoints = (routeNo) => cache.points[routeNo] || store.get('cache:points:' + routeNo, null);
 
+  // Точки, добавленные агентами, — отдельный раздел «Новые точки», а не нумерованный маршрут
+  const NEW_POINTS = 'Новые точки';
+  const routeName = (routeNo) => ((cache.summary || []).find((r) => Number(r.route) === Number(routeNo)) || {}).title === NEW_POINTS
+    ? NEW_POINTS : 'Маршрут ' + routeNo;
+
   function listView(routeNo) {
-    setBar('Маршрут ' + routeNo, '#/', { icon: I.map, href: '#/map/' + routeNo, label: 'Карта маршрута' });
+    setBar(routeName(routeNo), '#/', { icon: I.map, href: '#/map/' + routeNo, label: 'Карта маршрута' });
     const hash = location.hash;
     const group = (items) => '<div class="list">' + items.map(itemHtml).join('') + '</div>';
 
@@ -1317,7 +1322,8 @@
       return `<a class="row-item point${mine ? ' mine' : ''}${p.status === 'закрыта' ? ' closed' : ''}" href="#/p/${p.id}">
         <span class="num">${p.n}</span>
         <span class="grow"><div class="name">${esc(p.name)}</div>
-          <div class="addr">${esc(p.type)}${p.type ? ' · ' : ''}${esc(cleanAddr(p.address))}</div>${badge}</span>
+          <div class="addr">${esc(p.type)}${p.type ? ' · ' : ''}${esc(cleanAddr(p.address))}</div>
+          ${p.added ? `<div class="muted" style="font-size:13px">${p.phone ? esc(p.phone) + ' · ' : ''}добавил(а) ${esc(p.added)}</div>` : ''}${badge}</span>
         ${dist}${chev}</a>`;
     };
 
@@ -1644,7 +1650,7 @@
       if (location.hash !== hash) return;
     }
     const routeNo = p.route;
-    setBar('Маршрут ' + routeNo, '#/r/' + routeNo);
+    setBar(routeName(routeNo), '#/r/' + routeNo);
     let photos = [];
     let editing = null; // значения анкеты, когда автор её редактирует
     let revisit = null; // новый визит на выполненную точку: контакты из прошлой анкеты
@@ -2054,7 +2060,7 @@
     const due = ymd(new Date(Date.now() + 3 * 86400000));
     $app.innerHTML = `
       <div class="card">
-        <div class="muted">Маршрут ${p.route} · № ${p.n}</div>
+        <div class="muted">${esc(routeName(p.route))} · № ${p.n}</div>
         <h2>${esc(p.name)}</h2>
         <div class="muted">${esc(cleanAddr(p.address))}</div>
       </div>

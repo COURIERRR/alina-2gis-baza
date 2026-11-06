@@ -1,5 +1,5 @@
 // Кэш оболочки приложения: сначала сеть (чтобы обновления приходили сразу), без сети — кэш.
-const CACHE = 'alina-sales-v19';
+const CACHE = 'alina-sales-v20';
 // Каталоги и их просмотрщик: кэш не зависит от версии, обновление приложения его не стирает
 const CATALOGS = 'alina-catalogs';
 const EXCELJS = 'https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js';
