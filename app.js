@@ -1326,13 +1326,15 @@
 
   // Точки, добавленные агентами, — отдельный раздел «Новые точки», а не нумерованный маршрут
   const NEW_POINTS = 'Новые точки';
+  // В данных «Область» — маршрут 8 (номер 7 занят «Новыми точками»), а показывается он как «Маршрут 7»
+  const ROUTE_LABEL = { 8: 7 };
   const routeTitle = (routeNo) => ((cache.summary || []).find((r) => Number(r.route) === Number(routeNo)) || {}).title || '';
   // Маршруты КТ (100+ — ССС, 200+ — ЛКП) называются по названию из таблицы: «КТ-2 ССС · АК …»
   const routeName = (routeNo) => {
     const t = routeTitle(routeNo);
     if (t === NEW_POINTS) return NEW_POINTS;
     if (routeNo >= 100) return t ? t.split(' · ')[0] : (routeNo >= 200 ? 'КТ-' + (routeNo - 200) + ' ЛКП' : 'КТ-' + (routeNo - 100) + ' ССС');
-    return 'Маршрут ' + routeNo;
+    return 'Маршрут ' + (ROUTE_LABEL[routeNo] || routeNo);
   };
   const routeSub = (routeNo) => {
     const t = routeTitle(routeNo);
@@ -1694,7 +1696,35 @@
     let closing = false; // открыта форма «точка не работает»
     let history = null; // визиты точки, когда история открыта
     let ptasks = cache.tasks ? cache.tasks.filter((t) => t.point === id) : null; // сразу из сохранённых, потом обновятся
+    // Ключевая точка, отработанная раньше: итог прошлого визита и контакты из прошлой анкеты
+    let keyLast = null, keyLoaded = false, prefill = null;
     renderPoint();
+    if (p.key && p.visits > 0) {
+      api.history(id).then((h) => {
+        keyLast = h && h.length ? h[h.length - 1] : null;
+        keyLoaded = true;
+        if (location.hash === hash && $('kwBody')) $('kwBody').innerHTML = keyWhyHtml();
+      }).catch(() => { keyLoaded = true; if (location.hash === hash && $('kwBody')) $('kwBody').innerHTML = keyWhyHtml(); });
+      api.result(id).then((r) => {
+        if (!r) return;
+        prefill = {};
+        ['contact', 'position', 'phone', 'whatsapp', 'instagram', 'supplier', 'alina', 'manager', 'format',
+          'formatDesc', 'payment', 'traffic', 'ready', 'areaHall', 'areaStock'].forEach((k) => { if (r[k]) prefill[k] = r[k]; });
+        if (prefill.alina) prefill.alina = OLD_ALINA[prefill.alina] || prefill.alina;
+        // Форму перерисовываем, только пока в ней ничего не начали заполнять
+        if (location.hash === hash && $('f') && !Object.keys(store.get('draft:' + id, {})).length && !editing && !revisit) renderPoint();
+      }).catch(() => {});
+    }
+
+    function keyWhyHtml() {
+      const open = (ptasks || []).filter((t) => t.status === 'новое' || t.status === 'в работе').length;
+      const v = keyLast;
+      const line = (label, text) => text ? `<div><span class="muted">${label}</span> ${esc(text)}</div>` : '';
+      return (v ? `<div class="muted" style="font-size:13px">Прошлый визит ${esc(v.time)} · ${esc(v.agent)}</div>
+          ${line('Интерес:', v.interest)}${line('Итог / следующий шаг:', v.nextStep)}${line('Дата следующего шага:', v.nextDate)}${line('Комментарий:', v.comment)}`
+        : `<div class="muted">${keyLoaded ? 'Прошлый визит не найден' : 'Загружаем прошлый визит…'}</div>`) +
+        (open ? `<button type="button" class="link-btn kw-tasks" onclick="document.getElementById('ptasks').scrollIntoView({ behavior: 'smooth' })">Открытых заданий: ${open} — показать</button>` : '');
+    }
     // Актуальный статус с сервера
     loadPoints(routeNo).then((pts) => {
       const fresh = pts.find((x) => x.id === id);
@@ -1721,6 +1751,7 @@
       box.innerHTML = list.length ? '<div class="section-title">Задания по точке</div>' +
         list.map((t) => taskCard(t, { noPoint: true })).join('') : '';
       bindTaskActions(box, loadPointTasks);
+      if ($('kwBody')) $('kwBody').innerHTML = keyWhyHtml();
     }
 
     function drawHistory() {
@@ -1743,7 +1774,7 @@
       const closed = p.status === 'закрыта';
       const canFill = (!other && !done && !pending && !closed) || !!editing || !!revisit;
       const ownDone = done && !pending;
-      const src = editing || (revisit ? Object.assign({}, revisit, draft) : draft);
+      const src = editing || (revisit ? Object.assign({}, revisit, draft) : Object.assign({}, prefill || {}, draft));
       const canReopen = closed && (isManager() || p.closedBy === me.agent);
 
       let status = '';
@@ -1790,6 +1821,10 @@
             ${p.ak ? `<div><span class="muted">АК</span> ${esc(p.ak)}</div>` : ''}
             ${p.days ? `<div><span class="muted">Дни посещения</span> ${esc(p.days)}</div>` : ''}</div>` : ''}
           <div class="quick">${quick}</div>
+          ${p.key && p.visits > 0 && !done && !closed ? `<div class="key-why"><div class="kw-title">Что нужно отработать</div>
+            <div id="kwBody">${keyWhyHtml()}</div>
+            <button class="link-btn" id="hist">${history ? 'Скрыть историю' : 'История визитов (' + p.visits + ')'}</button>
+            <div id="histbox"></div></div>` : ''}
           ${status}
           ${!done && !other && !pending && !closed ? (mine
             ? '<button class="btn ghost" id="release">Отказаться от точки</button>'
@@ -3380,7 +3415,7 @@
 
       const map = newMap();
       const marks = shown.map((p) => L.circleMarker([p.lat, p.lon], { radius: 6, color: '#fff', weight: 1, fillColor: ZONE_COLORS[p.zone - 1], fillOpacity: p.done ? 0.5 : 0.95 })
-        .bindPopup(`<b>${esc(p.name)}</b><br>${esc(cleanAddr(p.address))}<br>Маршрут ${p.zone} (был ${p.origin})${p.acc === 'точно' ? '' : '<br>Адрес примерный'}`).addTo(map));
+        .bindPopup(`<b>${esc(p.name)}</b><br>${esc(cleanAddr(p.address))}<br>Маршрут ${ROUTE_LABEL[p.zone] || p.zone} (был ${p.origin})${p.acc === 'точно' ? '' : '<br>Адрес примерный'}`).addTo(map));
       if (marks.length) map.fitBounds(L.featureGroup(marks).getBounds().pad(0.05)); else map.setView(ALMATY, 11);
 
       $app.querySelectorAll('[data-zone]').forEach((s) => {

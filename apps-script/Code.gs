@@ -723,7 +723,8 @@ function summary_() {
       by[x] = by[x] || { route: x, title: titles[x] || '', total: 0, free: 0, work: 0, done: 0, closed: 0 };
       add(by[x], s);
     });
-    if (Number(row[P.route]) < KEY_ROUTE_MIN) add(akb, s);
+    // Ключевая точка в маршруте КТ снова свободна, но по базе 2ГИС она уже отработана
+    if (Number(row[P.route]) < KEY_ROUTE_MIN) add(akb, Number(row[P.key]) && s === ST_FREE && visitsOf_(row) > 0 ? ST_DONE : s);
     if (s === ST_CLOSED) closedAll++;
   });
   return { routes: Object.keys(by).sort((a, b) => a - b).map(k => by[k]), akb, closed: closedAll };
@@ -906,7 +907,7 @@ function result_(id) {
 function history_(id) {
   return resultRows_(id).rows.map((r, i) => ({
     visit: Number(r.rec.visit) || i + 1, time: r.rec.time, agent: r.rec.agent,
-    interest: r.rec.interest, nextStep: r.rec.nextStep, comment: r.rec.comment,
+    interest: r.rec.interest, nextStep: r.rec.nextStep, nextDate: r.rec.nextDate, comment: r.rec.comment,
     distance: r.rec.distance, gps: !!r.rec.gps, photos: r.rec.photos.split(/\s+/).filter(Boolean).length,
   }));
 }
