@@ -222,6 +222,8 @@ svg.chev { width: 16px; height: 16px; color: #c4c4c7; stroke-width: 2.6; flex: n
 
 .point-head h2 { font-size: 24px; margin-top: 2px; }
 .point-head .addr { color: var(--muted); font-size: 15px; }
+.point-head .client-1c { margin-top: 8px; padding: 8px 10px; border-radius: 10px; background: var(--chip); font-size: 14px; display: grid; gap: 2px; }
+.point-head .client-1c .muted { display: inline-block; min-width: 118px; }
 .quick { display: grid; grid-template-columns: repeat(auto-fit, minmax(64px, 1fr)); gap: 8px; margin: 14px 0 4px; }
 .qa {
   display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 10px 4px 8px;

@@ -63,6 +63,7 @@
   // Всё, что пришло с сервера, сохраняется на телефоне: экраны открываются сразу, свежие данные догружаются в фоне
   const cache = {
     summary: store.get('cache:summary', null), points: {}, tasks: store.get('cache:tasks', null),
+    akb: store.get('cache:akb', null), closedAll: store.get('cache:closedAll', null),
     stats: store.get('cache:stats', {}), me: store.get('cache:me', {}), staff: store.get('cache:staff', null),
     report: {},
   };
@@ -273,15 +274,22 @@
     const all = async () => {
       const s = state();
       const out = [];
-      (await load()).routes.concat(addedRoute()).forEach((r) => r.points.forEach((p) => {
+      (await load()).routes.concat(addedRoute(), ktRoutes()).forEach((r) => r.points.forEach((p) => {
         const st = s[p.id] || {};
         const zp = zonesDb().on && zonesDb().map[p.id];
+        const key = DEMO_KEY[p.id] || [];
         out.push(Object.assign({ lat: null, lon: null, acc: p.lat != null ? 'точно' : '' }, p,
-          { route: zp ? zp.zone : r.route, origin: r.route, n: zp ? zp.n : p.n, status: st.status || 'свободна', agent: st.agent || '', visits: st.visits || 0, lastVisit: fmtTime(st.last),
-            closedReason: st.closedReason || '', closedNote: st.closedNote || '', closedBy: st.closedBy || '', closedAt: fmtTime(st.closedAt) }));
+          { route: key[0] || (zp ? zp.zone : r.route), origin: r.route, n: zp ? zp.n : p.n, status: st.status || 'свободна', agent: st.agent || '', visits: st.visits || 0, lastVisit: fmtTime(st.last),
+            closedReason: st.closedReason || '', closedNote: st.closedNote || '', closedBy: st.closedBy || '', closedAt: fmtTime(st.closedAt),
+            key: key[0] || 0, key2: key[1] || 0 }));
       }));
       return out;
     };
+    // Демо ключевых маршрутов: клиенты 1С КТ-2 ССС и КТ-8 ЛКП; точка R1-004 — ключевая в обоих
+    const ktRoutes = () => [[102, 'КТ-2 ССС · АК Демо'], [208, 'КТ-8 ЛКП · АК Демо']].map(([route, title], k) => ({ route, title,
+      points: base.routes[k + 1].points.slice(0, 3).map((p, i) => Object.assign({}, p, { id: 'R' + route + '-00' + (i + 1), n: i + 1,
+        code1c: String(10100000 + route * 10 + i), ak: 'Демо АК', days: i ? 'Вт, Пт' : 'Пн, Чт' })) }));
+    const DEMO_KEY = { 'R1-004': [102, 208] };
     // Добавленные с места точки — отдельным маршрутом за последним из файла
     const addedRoute = () => {
       const points = store.get('mock:added', []);
@@ -337,15 +345,18 @@
       ping: () => wait({ ok: true }),
       summary: async () => {
         const by = {};
-        (await all()).forEach((p) => {
-          const r = by[p.route] || (by[p.route] = { route: p.route,
-            title: (base.routes.concat(addedRoute()).find((x) => x.route === p.route) || {}).title || '', total: 0, free: 0, work: 0, done: 0, closed: 0 });
+        (await all()).forEach((p) => [p.route, p.key2].filter(Boolean).forEach((no) => {
+          const r = by[no] || (by[no] = { route: no,
+            title: (base.routes.concat(addedRoute(), ktRoutes()).find((x) => x.route === no) || {}).title || '', total: 0, free: 0, work: 0, done: 0, closed: 0 });
           r.total++;
           if (p.status === 'выполнена') r.done++; else if (p.status === 'в работе') r.work++; else if (p.status === 'закрыта') r.closed++; else r.free++;
-        });
+        }));
         return wait(Object.values(by));
       },
-      points: async (route) => wait((await all()).filter((p) => p.route === Number(route))),
+      points: async (route) => {
+        const list = (await all()).filter((p) => p.route === Number(route) || p.key2 === Number(route));
+        return wait(Number(route) >= 100 ? list.map((p, i) => Object.assign({}, p, { n: i + 1 })) : list);
+      },
       pointAdd: async (f) => {
         await load();
         if (!f.name) fail('Укажите название точки');
@@ -1152,11 +1163,13 @@
     return api.boot(periodStart('day')).then((d) => {
       if ((d.zv || '') !== store.get('zv', '')) {
         store.set('zv', d.zv || '');
-        for (let n = 1; n <= 12; n++) store.del('cache:points:' + n);
+        try { Object.keys(localStorage).filter((k) => k.indexOf('cache:points:') === 0).forEach((k) => store.del(k)); } catch (e) {}
         cache.points = {};
       }
       d.routes.sort((a, b) => a.route - b.route);
       cache.summary = d.routes; saveCache('summary');
+      cache.akb = d.akb || null; store.set('cache:akb', cache.akb);
+      cache.closedAll = d.closed != null ? d.closed : null; store.set('cache:closedAll', cache.closedAll);
       cache.tasks = d.tasks; saveCache('tasks');
       cache.me['|day'] = d.me; saveCache('me');
       if (d.stats) { cache.stats.today = d.stats; saveCache('stats'); }
@@ -1204,7 +1217,9 @@
   // АКБ: все загруженные точки и сколько из них выполнено, по всем маршрутам вместе
   function akbCard(routes) {
     if (!routes || !routes.length) return '';
-    const sum = (k) => routes.reduce((s, r) => s + (r[k] || 0), 0);
+    // АКБ — база 2ГИС и добавленные агентами, каждая точка один раз; клиенты 1С из КТ сюда не входят
+    const base = routes.filter((r) => r.route < 100);
+    const sum = (k) => (cache.akb ? cache.akb[k] : base.reduce((s, r) => s + (r[k] || 0), 0)) || 0;
     const total = sum('total'), done = sum('done'), work = sum('work'), free = sum('free'), closed = sum('closed');
     // Нерабочие точки выполнить нельзя, поэтому процент считается только от рабочих
     const active = total - closed;
@@ -1217,7 +1232,8 @@
   }
 
   function closedRow(routes) {
-    const n = routes.reduce((s, r) => s + (r.closed || 0), 0);
+    // Ключевая точка бывает в двух маршрутах сразу, поэтому общее число — с сервера, без повторов
+    const n = cache.closedAll != null ? cache.closedAll : routes.reduce((s, r) => s + (r.closed || 0), 0);
     return n ? `<div class="list"><a class="row-item has-icon" href="#/closed"><span class="ri-icon" style="background:var(--bad)">${I.closed}</span>
       <span class="grow"><span class="ri-title">Нерабочие точки</span><span class="ri-sub" style="display:block">Закрылись или не работают: ${n}</span></span>${chev}</a></div>` : '';
   }
@@ -1260,20 +1276,29 @@
             <span class="ri-sub" style="display:block">НАШИ, AlinEX, FAWORI, V-tech</span></span>${chev}</a>
       </div>`;
     };
+    const routeRow = (r) => {
+      const active = r.total - (r.closed || 0);
+      const pd = active ? (r.done / active) * 100 : 0;
+      const pw = active ? (r.work / active) * 100 : 0;
+      const sub = routeSub(r.route);
+      return `<a class="row-item" href="#/r/${r.route}">
+        <span class="grow"><span class="ri-title">${esc(routeName(r.route))}</span>
+          ${sub ? `<span class="ri-sub" style="display:block">${esc(sub)}</span>` : ''}
+          <span class="progress" style="display:flex"><span class="done" style="width:${pd}%"></span><span class="work" style="width:${pw}%"></span></span>
+          <span class="ri-sub">Выполнено ${r.done} из ${active}${r.work ? ' · в работе ' + r.work : ''}${r.closed ? ` · <span style="color:var(--bad)">не работают ${r.closed}</span>` : ''}</span></span>
+        ${chev}</a>`;
+    };
+    // Разделы: добавленные агентами, ключевые ССС и ЛКП (клиенты 1С и точки с интересом), база 2ГИС
+    const sections = (routes) => [
+      ['Новые точки', routes.filter((r) => routeTitle(r.route) === NEW_POINTS)],
+      ['Ключевые · ССС', routes.filter((r) => r.route >= 100 && r.route < 200)],
+      ['Ключевые · ЛКП', routes.filter((r) => r.route >= 200 && r.route < 300)],
+      ['Точки из базы 2GIS', routes.filter((r) => r.route < 100 && routeTitle(r.route) !== NEW_POINTS)],
+    ].filter((s) => s[1].length).map((s) => `<div class="section-title">${s[0]}</div><div class="list">${s[1].map(routeRow).join('')}</div>`).join('');
     const render = (routes) => {
       $app.innerHTML = `<div class="subtitle">${esc(me.agent.split(' ')[0])} · ${esc(dateLine)}</div>` +
         goalCard(cache.me['|day']) + akbCard(routes) + tasksRow() +
-        '<div class="section-title">Маршруты</div>' + (routes ? '<div class="list">' + routes.map((r) => {
-          const active = r.total - (r.closed || 0);
-          const pd = active ? (r.done / active) * 100 : 0;
-          const pw = active ? (r.work / active) * 100 : 0;
-          return `<a class="row-item" href="#/r/${r.route}">
-            <span class="grow"><span class="ri-title">${esc(routeName(r.route))}</span>
-              ${r.title && r.title !== NEW_POINTS ? `<span class="ri-sub" style="display:block">${esc(r.title)}</span>` : ''}
-              <span class="progress" style="display:flex"><span class="done" style="width:${pd}%"></span><span class="work" style="width:${pw}%"></span></span>
-              <span class="ri-sub">Выполнено ${r.done} из ${active}${r.work ? ' · в работе ' + r.work : ''}${r.closed ? ` · <span style="color:var(--bad)">не работают ${r.closed}</span>` : ''}</span></span>
-            ${chev}</a>`;
-        }).join('') + `</div>${closedRow(routes)}<p class="muted" style="text-align:center">Старт: Алматы, Казыбаева 20</p>
+        (routes ? sections(routes) + `${closedRow(routes)}<p class="muted" style="text-align:center">Старт: Алматы, Казыбаева 20</p>
           <p class="muted" style="text-align:center;font-size:13px">Пока приложение открыто, руководитель видит ваше местоположение на карте команды.</p>` : '<div class="spinner">Загрузка…</div>');
       if ($('homeDay')) $('homeDay').onclick = async (ev) => {
         ev.target.disabled = true;
@@ -1301,8 +1326,19 @@
 
   // Точки, добавленные агентами, — отдельный раздел «Новые точки», а не нумерованный маршрут
   const NEW_POINTS = 'Новые точки';
-  const routeName = (routeNo) => ((cache.summary || []).find((r) => Number(r.route) === Number(routeNo)) || {}).title === NEW_POINTS
-    ? NEW_POINTS : 'Маршрут ' + routeNo;
+  const routeTitle = (routeNo) => ((cache.summary || []).find((r) => Number(r.route) === Number(routeNo)) || {}).title || '';
+  // Маршруты КТ (100+ — ССС, 200+ — ЛКП) называются по названию из таблицы: «КТ-2 ССС · АК …»
+  const routeName = (routeNo) => {
+    const t = routeTitle(routeNo);
+    if (t === NEW_POINTS) return NEW_POINTS;
+    if (routeNo >= 100) return t ? t.split(' · ')[0] : (routeNo >= 200 ? 'КТ-' + (routeNo - 200) + ' ЛКП' : 'КТ-' + (routeNo - 100) + ' ССС');
+    return 'Маршрут ' + routeNo;
+  };
+  const routeSub = (routeNo) => {
+    const t = routeTitle(routeNo);
+    if (t === NEW_POINTS) return 'Добавлены агентами с места';
+    return routeNo >= 100 ? t.split(' · ').slice(1).join(' · ') : t;
+  };
 
   function listView(routeNo) {
     setBar(routeName(routeNo), '#/', { icon: I.map, href: '#/map/' + routeNo, label: 'Карта маршрута' });
@@ -1745,10 +1781,14 @@
       ].join('');
       $app.innerHTML = `
         <div class="card point-head">
-          <div class="muted">№ ${p.n}${p.type ? ' · ' + esc(p.type) : ''}${p.added ? ' · добавил(а) ' + esc(p.added) : ''}</div>
+          <div class="muted">${p.key ? 'Ключевая · ' + esc([p.key, p.key2].filter(Boolean).map(routeName).join(', '))
+            : '№ ' + p.n}${p.type ? ' · ' + esc(p.type) : ''}${p.added ? ' · добавил(а) ' + esc(p.added) : ''}</div>
           <h2>${esc(p.name)}</h2>
           <div class="addr">${esc(p.address)}</div>
           ${p.phone ? `<div class="addr">${esc(p.phone)}</div>` : ''}
+          ${p.code1c || p.days || p.ak ? `<div class="client-1c">${p.code1c ? `<div><span class="muted">Клиент 1С</span> ${esc(p.code1c)}</div>` : ''}
+            ${p.ak ? `<div><span class="muted">АК</span> ${esc(p.ak)}</div>` : ''}
+            ${p.days ? `<div><span class="muted">Дни посещения</span> ${esc(p.days)}</div>` : ''}</div>` : ''}
           <div class="quick">${quick}</div>
           ${status}
           ${!done && !other && !pending && !closed ? (mine
@@ -2031,13 +2071,17 @@
     });
   }
 
+  // Ключевая точка может быть в двух маршрутах (ССС и ЛКП): обновляем её везде, № в каждом списке свой
   function updateCached(p) {
-    const list = cachedPoints(p.route);
-    if (!list) return;
-    const i = list.findIndex((x) => x.id === p.id);
-    if (i >= 0) list[i] = p;
-    cache.points[p.route] = list;
-    store.set('cache:points:' + p.route, list);
+    [p.route, p.key2].filter(Boolean).forEach((r) => {
+      const list = cachedPoints(r);
+      if (!list) return;
+      const i = list.findIndex((x) => x.id === p.id);
+      if (i < 0) return;
+      list[i] = Object.assign({}, p, { n: list[i].n });
+      cache.points[r] = list;
+      store.set('cache:points:' + r, list);
+    });
   }
 
   function readForm(f) {

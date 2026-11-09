@@ -24,11 +24,16 @@ const P = {
   phone: 13, whatsapp: 14, gis: 15, visits: 16, last: 17, added: 18,
   closedReason: 19, closedNote: 20, closedBy: 21, closedAt: 22, closedGps: 23, addedAt: 24,
   zone: 25, zoneN: 26,
+  // Ключевые: клиенты 1С из каверидж ССС/ЛКП и точки приложения, переданные в их маршруты
+  code1c: 27, days: 28, ak: 29, key: 30, key2: 31,
 };
 const POINTS_HEADER = ['id', 'Маршрут', '№', 'Точка', 'Тип', 'Адрес',
   'lat', 'lon', 'Точность', 'Статус', 'Агент', 'Взята', 'Выполнена',
   'Телефон', 'WhatsApp', 'Ссылка 2ГИС', 'Визитов', 'Последний визит', 'Добавил',
-  'Причина закрытия', 'Комментарий к закрытию', 'Кто отметил', 'Когда отметили', 'GPS отметки', 'Добавлена', 'Зона', '№ в зоне'];
+  'Причина закрытия', 'Комментарий к закрытию', 'Кто отметил', 'Когда отметили', 'GPS отметки', 'Добавлена', 'Зона', '№ в зоне',
+  'Код 1С', 'Дни посещения', 'АК', 'Ключевой маршрут', 'Ключевой маршрут 2'];
+// Маршруты ключевых клиентов: 100 + № КТ — ССС, 200 + № КТ — ЛКП (КТ-2 ССС = 102, КТ-8 ЛКП = 208)
+const KEY_ROUTE_MIN = 100;
 const NEW_POINTS_TITLE = 'Новые точки'; // маршрут для точек, которые агенты добавляют с места
 
 const ST_FREE = 'свободна';
@@ -274,7 +279,7 @@ function addRoutes_(routes) {
     const has = p.lat != null && p.lon != null;
     rows.push([p.id, r.route, p.n, p.name, p.type, p.address,
       has ? p.lat : '', has ? p.lon : '', has ? 'точно' : '', ST_FREE, '', '', '',
-      p.phone || '', p.whatsapp || '', p.gis || '', '', '', '', '', '', '', '', '', '', '', '']);
+      p.phone || '', p.whatsapp || '', p.gis || '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '']);
   }));
   if (rows.length) {
     const range = sh.getRange(sh.getLastRow() + 1, 1, rows.length, POINTS_HEADER.length);
@@ -367,7 +372,7 @@ function doGet(e) {
     const q = e.parameter || {};
     if (q.action === 'ping') return {};
     auth_(q.token);
-    if (q.action === 'summary') return cached_('summary', 600, summary_);
+    if (q.action === 'summary') return summaryCached_();
     if (q.action === 'points') return { points: cached_('points:' + Number(q.route), 600, () => points_(Number(q.route))) };
     if (q.action === 'point') return { point: toPoint_(findRow_(q.id).row) };
     if (q.action === 'result') return { result: result_(q.id) };
@@ -440,11 +445,15 @@ const allTasksCached_ = () => cached_('tasks', 600, () => tasks_(''));
 const meCached_ = (me, from, who) => cached_('me:' + nameKey_(me.name) + ':' + (me.role === ROLE_MANAGER ? nameKey_(who) : '') + ':' + from, 600,
   () => me_(me, from, who));
 const statsCached_ = (from) => cached_('stats:' + from, 300, () => stats_(from));
+const summaryCached_ = () => cached_('summary2', 600, summary_);
 
 /** Стартовый экран одним запросом: маршруты, задания, свой день; руководителю — ещё «Сегодня» по команде. */
 function boot_(me, from) {
+  const s = summaryCached_();
   return {
-    routes: cached_('summary', 600, summary_).routes,
+    routes: s.routes,
+    akb: s.akb || null,
+    closed: s.closed || 0,
     tasks: allTasksCached_(),
     me: meCached_(me, from, ''),
     stats: me.role === ROLE_MANAGER ? statsCached_(from) : null,
@@ -548,6 +557,8 @@ function toPoint_(row) {
     visits: visitsOf_(row), lastVisit: fmt_(row[P.last] || row[P.done]), added: String(row[P.added] || ''),
     closedReason: String(row[P.closedReason] || ''), closedNote: String(row[P.closedNote] || ''),
     closedBy: String(row[P.closedBy] || ''), closedAt: fmt_(row[P.closedAt]),
+    code1c: String(row[P.code1c] || ''), days: String(row[P.days] || ''), ak: String(row[P.ak] || ''),
+    key: Number(row[P.key]) || 0, key2: Number(row[P.key2]) || 0,
   };
 }
 
@@ -622,7 +633,7 @@ function pointAdd_(agent, f) {
   const id = 'R' + route + '-' + String(n).padStart(3, '0');
   const row = [id, route, n, name, String(f.type || '').trim(), address,
     has ? lat : '', has ? lon : '', has ? 'точно' : '', ST_FREE, '', '', '',
-    String(f.phone || '').trim(), '', '', '', '', agent, '', '', '', '', '', new Date(), '', ''];
+    String(f.phone || '').trim(), '', '', '', '', agent, '', '', '', '', '', new Date(), '', '', '', '', '', '', ''];
   const range = sh.getRange(sh.getLastRow() + 1, 1, 1, POINTS_HEADER.length);
   range.offset(0, P.phone, 1, 2).setNumberFormat('@');
   range.setValues([row]);
@@ -697,18 +708,37 @@ function summary_() {
   const props = PropertiesService.getScriptProperties();
   const titles = Object.assign(JSON.parse(props.getProperty('ROUTE_TITLES') || '{}'),
     zonesOn_() ? JSON.parse(props.getProperty('ZONE_TITLES') || '{}') : {});
+  // АКБ — точки из базы 2ГИС и добавленные агентами (без клиентов 1С), каждая один раз
+  const akb = { total: 0, free: 0, work: 0, done: 0, closed: 0 };
+  let closedAll = 0;
+  const add = (o, s) => {
+    o.total++;
+    if (s === ST_DONE) o.done++; else if (s === ST_WORK) o.work++; else if (s === ST_CLOSED) o.closed++; else o.free++;
+  };
   allPoints_().values.forEach(row => {
-    const r = effRoute_(row);
-    by[r] = by[r] || { route: r, title: titles[r] || '', total: 0, free: 0, work: 0, done: 0, closed: 0 };
-    by[r].total++;
     const s = row[P.status] || ST_FREE;
-    if (s === ST_DONE) by[r].done++; else if (s === ST_WORK) by[r].work++; else if (s === ST_CLOSED) by[r].closed++; else by[r].free++;
+    const r = effRoute_(row);
+    // Ключевая точка приложения может стоять сразу в двух маршрутах: ССС и ЛКП
+    [r, Number(row[P.key2])].filter((x, i, a) => x && a.indexOf(x) === i).forEach(x => {
+      by[x] = by[x] || { route: x, title: titles[x] || '', total: 0, free: 0, work: 0, done: 0, closed: 0 };
+      add(by[x], s);
+    });
+    if (Number(row[P.route]) < KEY_ROUTE_MIN) add(akb, s);
+    if (s === ST_CLOSED) closedAll++;
   });
-  return { routes: Object.keys(by).sort((a, b) => a - b).map(k => by[k]) };
+  return { routes: Object.keys(by).sort((a, b) => a - b).map(k => by[k]), akb, closed: closedAll };
 }
 
 function points_(route) {
-  const list = allPoints_().values.filter(row => effRoute_(row) === route).map(toPoint_);
+  const rows = allPoints_().values.filter(row => effRoute_(row) === route || Number(row[P.key2]) === route);
+  const list = rows.map(toPoint_);
+  if (route >= KEY_ROUTE_MIN) {
+    // Сначала клиенты 1С в порядке объезда, за ними ключевые точки приложения; № — место в этом списке
+    const client = (p) => p.origin >= KEY_ROUTE_MIN ? 0 : 1;
+    list.sort((a, b) => client(a) - client(b) || (client(a) ? a.name.localeCompare(b.name) : a.n - b.n));
+    list.forEach((p, i) => { p.n = i + 1; });
+    return list;
+  }
   return zonesOn_() ? list.sort((a, b) => a.n - b.n) : list;
 }
 
@@ -1542,13 +1572,12 @@ function dayReport_(date) {
     return a;
   }).sort((a, b) => b.visits - a.visits || b.closed - a.closed || a.name.localeCompare(b.name));
   const sum = (k) => agents.reduce((s, a) => s + a[k], 0);
-  const routes = summary_().routes;
-  const rsum = (k) => routes.reduce((s, r) => s + r[k], 0);
+  const akb = summary_().akb;
   const out = {
     date, label: Utilities.formatDate(new Date(from), TZ, 'dd.MM.yyyy'), agents, closed, added, tasks,
     totals: { visits: sum('visits'), newPoints: sum('newPoints'), repeat: sum('repeat'), far: sum('far'), noGps: sum('noGps'),
       closed: closed.length, added: added.length, issued: sum('issued'), taken: sum('taken'), done: sum('done') },
-    akb: { total: rsum('total'), done: rsum('done'), work: rsum('work'), free: rsum('free'), closed: rsum('closed') },
+    akb: { total: akb.total, done: akb.done, work: akb.work, free: akb.free, closed: akb.closed },
   };
   out.active = !!(out.totals.visits || closed.length || added.length || tasks.length);
   out.prevVisits = prevVisits;
@@ -1729,7 +1758,9 @@ function zonesOn_() {
 }
 // Точка без зоны остаётся в своём старом маршруте — при включении ничего не пропадёт
 // Точка, добавленная агентом (колонка «Добавил»), в районы не входит: она всегда в разделе «Новые точки»
-const effRoute_ = (row) => zonesOn_() && !row[P.added] && Number(row[P.zone]) ? Number(row[P.zone]) : Number(row[P.route]);
+// Ключевая точка приложения (колонка «Ключевой маршрут») показывается в маршруте КТ, клиент 1С — в своём
+const effRoute_ = (row) => Number(row[P.key]) ||
+  (zonesOn_() && !row[P.added] && Number(row[P.zone]) ? Number(row[P.zone]) : Number(row[P.route]));
 
 const zoneXY_ = (p) => ({ x: p.lon * 81.1, y: p.lat * 111 }); // км; для широты Алматы
 const dist2_ = (a, b) => (a.x - b.x) ** 2 + (a.y - b.y) ** 2;
@@ -1808,8 +1839,9 @@ function zonesBuild_() {
   if (zonesOn_()) fail_('Новые маршруты уже включены — сначала верните старые');
   const { sh, values } = allPoints_();
   const pts = values.map((row, i) => {
-    const has = row[P.lat] !== '' && row[P.lon] !== '' && !row[P.added];
-    const p = { i, acc: row[P.added] ? '' : String(row[P.acc] || ''), key: row[P.added] ? '' : streetKey_(row[P.address]), zone: 0,
+    const out = row[P.added] || Number(row[P.route]) >= KEY_ROUTE_MIN; // добавленные агентами и клиенты 1С — вне районов
+    const has = row[P.lat] !== '' && row[P.lon] !== '' && !out;
+    const p = { i, acc: out ? '' : String(row[P.acc] || ''), key: out ? '' : streetKey_(row[P.address]), zone: 0,
       lat: has ? Number(row[P.lat]) : null, lon: has ? Number(row[P.lon]) : null };
     return has ? Object.assign(p, zoneXY_(p)) : p;
   });
@@ -1862,7 +1894,7 @@ function zonesPreview_() {
   const stored = JSON.parse(props.getProperty('ZONE_TITLES') || '{}');
   const titles = [];
   for (let z = 1; z <= ZONES; z++) titles.push(stored[z] || '');
-  const rows = allPoints_().values.filter(row => !row[P.added]);
+  const rows = allPoints_().values.filter(row => !row[P.added] && Number(row[P.route]) < KEY_ROUTE_MIN && !Number(row[P.key]));
   return {
     on: zonesOn_(), built: rows.some(row => Number(row[P.zone]) > 0), titles,
     points: rows.map(row => ({
@@ -1980,7 +2012,7 @@ function zonesEnable_(agent, on) {
     // Точки без зоны после расчёта — в ближайшую; добавленные агентами остаются в «Новых точках»
     const sh = pointsSheet_();
     rows.forEach((row, i) => {
-      if (row[P.added] || Number(row[P.zone]) || row[P.lat] === '' || row[P.lon] === '') return;
+      if (row[P.added] || Number(row[P.route]) >= KEY_ROUTE_MIN || Number(row[P.zone]) || row[P.lat] === '' || row[P.lon] === '') return;
       const z = nearestZone_(Number(row[P.lat]), Number(row[P.lon]));
       if (!z) return;
       const n = rows.reduce((m, r) => Number(r[P.zone]) === z ? Math.max(m, Number(r[P.zoneN]) || 0) : m, 0) + 1;
