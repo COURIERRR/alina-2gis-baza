@@ -1762,6 +1762,75 @@ function reportSetup() {
   Logger.log('Триггер создан: ' + ScriptApp.getProjectTriggers().filter(t => t.getHandlerFunction() === 'sendDailyReport').length);
 }
 
+/* ---------------- Координаты ключевых точек ----------------
+ * У Google лимит геокодирования около 1000 адресов в сутки, поэтому точки без координат доделываются
+ * ежедневным триггером. Пишутся только lat, lon и «Точность»; не найденный адрес помечается «не найден»
+ * и больше не запрашивается. Когда точек без координат не остаётся, триггер удаляет себя сам. */
+function geocodeKeyPoints() {
+  const started = Date.now();
+  const { values } = allPoints_();
+  const meta = routeMeta_();
+  const todo = [];
+  values.forEach((r, i) => { if (Number(r[P.route]) >= KEY_ROUTE_MIN && r[P.lat] === '' && r[P.acc] !== 'не найден') todo.push(i); });
+  if (!todo.length) {
+    ScriptApp.getProjectTriggers().filter(t => t.getHandlerFunction() === 'geocodeKeyPoints').forEach(t => ScriptApp.deleteTrigger(t));
+    Logger.log('Все ключевые точки с координатами, ежедневный запуск отключён');
+    return;
+  }
+  const geo = { kz: Maps.newGeocoder().setLanguage('ru').setRegion('kz'), kg: Maps.newGeocoder().setLanguage('ru').setRegion('kg') };
+  const centers = {};
+  const found = [];
+  let stop = '';
+  const save = () => {
+    if (!found.length) return;
+    withLock_(() => {
+      const sh = pointsSheet_();
+      found.splice(0).forEach(f => {
+        // Строки только добавляются в конец, но на всякий случай сверяем id
+        if (String(sh.getRange(f.i + 2, P.id + 1).getValue()) !== f.id) return;
+        sh.getRange(f.i + 2, P.lat + 1, 1, 3).setValues([[f.lat, f.lon, f.acc]]);
+      });
+    });
+  };
+  for (const i of todo) {
+    if (Date.now() - started > 280000) break;
+    const r = values[i];
+    const city = (meta[Number(r[P.route])] || {}).city || KEY_CITY;
+    const kg = city === 'Бишкек', country = kg ? 'Кыргызстан' : 'Казахстан';
+    const g = kg ? geo.kg : geo.kz;
+    let res = null;
+    try {
+      if (!(city in centers)) { Utilities.sleep(1100); const c = g.geocode(city + ', ' + country); centers[city] = c.status === 'OK' && c.results[0] ? c.results[0].geometry.location : null; }
+      Utilities.sleep(1100);
+      const a = g.geocode(String(r[P.address]) + (String(r[P.address]).indexOf(city) < 0 ? ', ' + city : '') + ', ' + country);
+      const b = a.status === 'OK' && a.results[0];
+      const cen = centers[city];
+      // Адрес дальше 60 км от своего города — скорее всего ошибка геокодера
+      if (b && (!cen || meters_(b.geometry.location.lat, b.geometry.location.lng, cen.lat, cen.lng) < 60000)) {
+        const precise = ['ROOFTOP', 'RANGE_INTERPOLATED'].indexOf(b.geometry.location_type) >= 0 && !b.partial_match;
+        res = { lat: b.geometry.location.lat, lon: b.geometry.location.lng, acc: precise ? 'точно' : 'примерно' };
+      }
+    } catch (e) {
+      const msg = String(e.message);
+      if (/день|day/i.test(msg)) { stop = msg; break; }
+      continue; // частые запросы — попробуем эту точку в следующий раз
+    }
+    found.push(Object.assign({ i, id: String(r[P.id]) }, res || { lat: '', lon: '', acc: 'не найден' }));
+    if (found.length >= 20) save();
+  }
+  save();
+  const left = allPoints_().values.filter(r => Number(r[P.route]) >= KEY_ROUTE_MIN && r[P.lat] === '' && r[P.acc] !== 'не найден').length;
+  log_('Система', 'координаты ключевых точек', '', 'Осталось без координат: ' + left + (stop ? ' (лимит Google на сегодня)' : ''));
+  Logger.log('Осталось без координат: ' + left + (stop ? ' | ' + stop : ''));
+}
+
+/** Один раз из редактора: ежедневный запуск geocodeKeyPoints в 10:00 по Алматы (лимит Google к этому времени обновляется). */
+function geocodeKeySetup() {
+  ScriptApp.getProjectTriggers().filter(t => t.getHandlerFunction() === 'geocodeKeyPoints').forEach(t => ScriptApp.deleteTrigger(t));
+  ScriptApp.newTrigger('geocodeKeyPoints').timeBased().everyDays(1).atHour(10).nearMinute(0).inTimezone(TZ).create();
+  Logger.log('Триггер координат создан: ' + ScriptApp.getProjectTriggers().filter(t => t.getHandlerFunction() === 'geocodeKeyPoints').length);
+}
+
 /* ---------------- Маршруты по зонам ----------------
  * Новые маршруты — отдельный слой поверх данных: заполняются только колонки «Зона» и «№ в зоне».
  * id, старый маршрут, статусы, анкеты (листы «Маршрут N»), фото и задания не меняются,
