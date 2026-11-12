@@ -36,6 +36,11 @@ const POINTS_HEADER = ['id', 'Маршрут', '№', 'Точка', 'Тип', '�
 // Город, линия, название и АК маршрута — в свойстве скрипта ROUTE_META: { "302": { city, line, name, ak } }
 const KEY_ROUTE_MIN = 100;
 const KEY_CITY = 'Алматы'; // база 2ГИС, районы и новые точки — Алматы
+// Канал точки как в фильтре приложения: «кт» → «КТ», «Дилер» → «Дилеры»
+const channelOf_ = (row) => {
+  const c = String(row[P.channel] || '').trim();
+  return /^кт$/i.test(c) ? 'КТ' : /^дилер/i.test(c) ? 'Дилеры' : c;
+};
 const routeMeta_ = () => { try { return JSON.parse(PropertiesService.getScriptProperties().getProperty('ROUTE_META') || '{}'); } catch (e) { return {}; } };
 const NEW_POINTS_TITLE = 'Новые точки'; // маршрут для точек, которые агенты добавляют с места
 
@@ -376,7 +381,8 @@ function doGet(e) {
     if (q.action === 'ping') return {};
     auth_(q.token);
     if (q.action === 'summary') return summaryCached_();
-    if (q.action === 'points') return { points: cached_('points:' + Number(q.route), 600, () => points_(Number(q.route))) };
+    // Большие маршруты КТ не влезают в обычный кэш — кладём кусками
+    if (q.action === 'points') return { points: cachedBig_('points:' + Number(q.route), 600, () => points_(Number(q.route))) };
     if (q.action === 'point') return { point: toPoint_(findRow_(q.id).row) };
     if (q.action === 'result') return { result: result_(q.id) };
     if (q.action === 'history') return { visits: cached_('hist:' + q.id, 600, () => history_(q.id)) };
@@ -561,7 +567,7 @@ function toPoint_(row) {
     closedReason: String(row[P.closedReason] || ''), closedNote: String(row[P.closedNote] || ''),
     closedBy: String(row[P.closedBy] || ''), closedAt: fmt_(row[P.closedAt]),
     code1c: String(row[P.code1c] || ''), days: String(row[P.days] || ''), ak: String(row[P.ak] || ''),
-    key: Number(row[P.key]) || 0, key2: Number(row[P.key2]) || 0, channel: String(row[P.channel] || ''),
+    key: Number(row[P.key]) || 0, key2: Number(row[P.key2]) || 0, channel: channelOf_(row),
   };
 }
 
@@ -724,7 +730,7 @@ function summary_() {
     const s = row[P.status] || ST_FREE;
     const r = effRoute_(row);
     // Канал — у клиентов из каверидж; ключевые точки приложения — розничные магазины (КТ)
-    const ch = String(row[P.channel] || 'КТ');
+    const ch = channelOf_(row) || 'КТ';
     // Ключевая точка приложения может стоять сразу в двух маршрутах: ССС и ЛКП
     [r, Number(row[P.key2])].filter((x, i, a) => x && a.indexOf(x) === i).forEach(x => {
       if (!by[x]) {
