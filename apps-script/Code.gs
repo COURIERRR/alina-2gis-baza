@@ -25,15 +25,18 @@ const P = {
   closedReason: 19, closedNote: 20, closedBy: 21, closedAt: 22, closedGps: 23, addedAt: 24,
   zone: 25, zoneN: 26,
   // Ключевые: клиенты 1С из каверидж ССС/ЛКП и точки приложения, переданные в их маршруты
-  code1c: 27, days: 28, ak: 29, key: 30, key2: 31,
+  code1c: 27, days: 28, ak: 29, key: 30, key2: 31, channel: 32,
 };
 const POINTS_HEADER = ['id', 'Маршрут', '№', 'Точка', 'Тип', 'Адрес',
   'lat', 'lon', 'Точность', 'Статус', 'Агент', 'Взята', 'Выполнена',
   'Телефон', 'WhatsApp', 'Ссылка 2ГИС', 'Визитов', 'Последний визит', 'Добавил',
   'Причина закрытия', 'Комментарий к закрытию', 'Кто отметил', 'Когда отметили', 'GPS отметки', 'Добавлена', 'Зона', '№ в зоне',
-  'Код 1С', 'Дни посещения', 'АК', 'Ключевой маршрут', 'Ключевой маршрут 2'];
-// Маршруты ключевых клиентов: 100 + № КТ — ССС, 200 + № КТ — ЛКП (КТ-2 ССС = 102, КТ-8 ЛКП = 208)
+  'Код 1С', 'Дни посещения', 'АК', 'Ключевой маршрут', 'Ключевой маршрут 2', 'Канал'];
+// Маршруты ключевых клиентов (каверидж ССС и ЛКП) — номера от 100: КТ-2 ССС Алматы = 102, КТ-8 ЛКП = 208, остальные с 300.
+// Город, линия, название и АК маршрута — в свойстве скрипта ROUTE_META: { "302": { city, line, name, ak } }
 const KEY_ROUTE_MIN = 100;
+const KEY_CITY = 'Алматы'; // база 2ГИС, районы и новые точки — Алматы
+const routeMeta_ = () => { try { return JSON.parse(PropertiesService.getScriptProperties().getProperty('ROUTE_META') || '{}'); } catch (e) { return {}; } };
 const NEW_POINTS_TITLE = 'Новые точки'; // маршрут для точек, которые агенты добавляют с места
 
 const ST_FREE = 'свободна';
@@ -279,7 +282,7 @@ function addRoutes_(routes) {
     const has = p.lat != null && p.lon != null;
     rows.push([p.id, r.route, p.n, p.name, p.type, p.address,
       has ? p.lat : '', has ? p.lon : '', has ? 'точно' : '', ST_FREE, '', '', '',
-      p.phone || '', p.whatsapp || '', p.gis || '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '']);
+      p.phone || '', p.whatsapp || '', p.gis || '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '']);
   }));
   if (rows.length) {
     const range = sh.getRange(sh.getLastRow() + 1, 1, rows.length, POINTS_HEADER.length);
@@ -558,7 +561,7 @@ function toPoint_(row) {
     closedReason: String(row[P.closedReason] || ''), closedNote: String(row[P.closedNote] || ''),
     closedBy: String(row[P.closedBy] || ''), closedAt: fmt_(row[P.closedAt]),
     code1c: String(row[P.code1c] || ''), days: String(row[P.days] || ''), ak: String(row[P.ak] || ''),
-    key: Number(row[P.key]) || 0, key2: Number(row[P.key2]) || 0,
+    key: Number(row[P.key]) || 0, key2: Number(row[P.key2]) || 0, channel: String(row[P.channel] || ''),
   };
 }
 
@@ -633,7 +636,7 @@ function pointAdd_(agent, f) {
   const id = 'R' + route + '-' + String(n).padStart(3, '0');
   const row = [id, route, n, name, String(f.type || '').trim(), address,
     has ? lat : '', has ? lon : '', has ? 'точно' : '', ST_FREE, '', '', '',
-    String(f.phone || '').trim(), '', '', '', '', agent, '', '', '', '', '', new Date(), '', '', '', '', '', '', ''];
+    String(f.phone || '').trim(), '', '', '', '', agent, '', '', '', '', '', new Date(), '', '', '', '', '', '', '', ''];
   const range = sh.getRange(sh.getLastRow() + 1, 1, 1, POINTS_HEADER.length);
   range.offset(0, P.phone, 1, 2).setNumberFormat('@');
   range.setValues([row]);
@@ -715,13 +718,22 @@ function summary_() {
     o.total++;
     if (s === ST_DONE) o.done++; else if (s === ST_WORK) o.work++; else if (s === ST_CLOSED) o.closed++; else o.free++;
   };
+  const meta = routeMeta_();
+  const blank = () => ({ total: 0, free: 0, work: 0, done: 0, closed: 0 });
   allPoints_().values.forEach(row => {
     const s = row[P.status] || ST_FREE;
     const r = effRoute_(row);
+    // Канал — у клиентов из каверидж; ключевые точки приложения — розничные магазины (КТ)
+    const ch = String(row[P.channel] || 'КТ');
     // Ключевая точка приложения может стоять сразу в двух маршрутах: ССС и ЛКП
     [r, Number(row[P.key2])].filter((x, i, a) => x && a.indexOf(x) === i).forEach(x => {
-      by[x] = by[x] || { route: x, title: titles[x] || '', total: 0, free: 0, work: 0, done: 0, closed: 0 };
+      if (!by[x]) {
+        const m = meta[x] || {};
+        by[x] = Object.assign({ route: x, title: titles[x] || '', city: m.city || (x < 300 ? KEY_CITY : ''), line: m.line || '',
+          name: m.name || '', ak: m.ak || '', ch: {} }, blank());
+      }
       add(by[x], s);
+      if (x >= KEY_ROUTE_MIN) add(by[x].ch[ch] = by[x].ch[ch] || blank(), s);
     });
     // Ключевая точка в маршруте КТ снова свободна, но по базе 2ГИС она уже отработана
     if (Number(row[P.route]) < KEY_ROUTE_MIN) add(akb, Number(row[P.key]) && s === ST_FREE && visitsOf_(row) > 0 ? ST_DONE : s);

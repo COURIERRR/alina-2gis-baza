@@ -286,9 +286,13 @@
       return out;
     };
     // Демо ключевых маршрутов: клиенты 1С КТ-2 ССС и КТ-8 ЛКП; точка R1-004 — ключевая в обоих
-    const ktRoutes = () => [[102, 'КТ-2 ССС · АК Демо'], [208, 'КТ-8 ЛКП · АК Демо']].map(([route, title], k) => ({ route, title,
+    // и маршрут другого города (Астана, ЛКП) с каналами УНП и СКПБ — для проверки выбора города и канала
+    const DEMO_META = { 102: { city: 'Алматы', line: 'ССС', name: 'КТ-2', ak: 'Демо АК' }, 208: { city: 'Алматы', line: 'ЛКП', name: 'КТ-8', ak: 'Демо АК' },
+      301: { city: 'Астана', line: 'ЛКП', name: 'КТ-1', ak: 'Демо Астана' } };
+    const ktRoutes = () => [[102, 'КТ-2 ССС · АК Демо'], [208, 'КТ-8 ЛКП · АК Демо'], [301, 'КТ-1 ЛКП · АК Демо Астана']].map(([route, title], k) => ({ route, title,
       points: base.routes[k + 1].points.slice(0, 3).map((p, i) => Object.assign({}, p, { id: 'R' + route + '-00' + (i + 1), n: i + 1,
-        code1c: String(10100000 + route * 10 + i), ak: 'Демо АК', days: i ? 'Вт, Пт' : 'Пн, Чт' })) }));
+        code1c: String(10100000 + route * 10 + i), ak: 'Демо АК', days: i ? 'Вт, Пт' : 'Пн, Чт',
+        channel: route === 301 ? ['УНП', 'СКПБ', 'КТ'][i] : 'КТ' })) }));
     const DEMO_KEY = { 'R1-004': [102, 208] };
     // Добавленные с места точки — отдельным маршрутом за последним из файла
     const addedRoute = () => {
@@ -345,11 +349,16 @@
       ping: () => wait({ ok: true }),
       summary: async () => {
         const by = {};
-        (await all()).forEach((p) => [p.route, p.key2].filter(Boolean).forEach((no) => {
-          const r = by[no] || (by[no] = { route: no,
-            title: (base.routes.concat(addedRoute(), ktRoutes()).find((x) => x.route === no) || {}).title || '', total: 0, free: 0, work: 0, done: 0, closed: 0 });
+        const add = (r, p) => {
           r.total++;
           if (p.status === 'выполнена') r.done++; else if (p.status === 'в работе') r.work++; else if (p.status === 'закрыта') r.closed++; else r.free++;
+        };
+        (await all()).forEach((p) => [p.route, p.key2].filter(Boolean).forEach((no) => {
+          const r = by[no] || (by[no] = Object.assign({ route: no,
+            title: (base.routes.concat(addedRoute(), ktRoutes()).find((x) => x.route === no) || {}).title || '', total: 0, free: 0, work: 0, done: 0, closed: 0 },
+            no >= 100 ? Object.assign({ ch: {} }, DEMO_META[no]) : {}));
+          add(r, p);
+          if (no >= 100) { const c = p.channel || 'КТ'; add(r.ch[c] = r.ch[c] || { total: 0, free: 0, work: 0, done: 0, closed: 0 }, p); }
         }));
         return wait(Object.values(by));
       },
@@ -849,6 +858,7 @@
     if (h === 'teammap') return teamMapView();
     if (h === 'zones') return zonesView();
     if (h === 'banners') return bannersView();
+    if (h === 'keymap') return keyMapView();
     if (h === 'catalogs') return catalogsView();
     if ((m = h.match(/^catalog\/([\w-]+)$/))) return catalogView(m[1]);
     if ((m = h.match(/^zayavki(?:\/(R\d+-\d+))?$/))) return zayavkiView(m[1]);
@@ -1188,7 +1198,8 @@
         // Главная сама делает этот запрос — на других экранах делаем его здесь
         if (location.hash.replace(/^#\/?/, '') !== '') await refreshAll();
         else await new Promise((r) => setTimeout(r, 2500));
-        for (const r of cache.summary || []) {
+        // Только маршруты выбранных городов: городов и маршрутов много
+        for (const r of visibleRoutes(cache.summary)) {
           if (!me.token) return;
           await loadPoints(r.route);
         }
@@ -1276,7 +1287,8 @@
             <span class="ri-sub" style="display:block">НАШИ, AlinEX, FAWORI, V-tech</span></span>${chev}</a>
       </div>`;
     };
-    const routeRow = (r) => {
+    const routeRow = (r0) => {
+      const r = routeCounts(r0);
       const active = r.total - (r.closed || 0);
       const pd = active ? (r.done / active) * 100 : 0;
       const pw = active ? (r.work / active) * 100 : 0;
@@ -1288,18 +1300,45 @@
           <span class="ri-sub">Выполнено ${r.done} из ${active}${r.work ? ' · в работе ' + r.work : ''}${r.closed ? ` · <span style="color:var(--bad)">не работают ${r.closed}</span>` : ''}</span></span>
         ${chev}</a>`;
     };
-    // Разделы: добавленные агентами, ключевые ССС и ЛКП (клиенты 1С и точки с интересом), база 2ГИС
-    const sections = (routes) => [
-      ['Новые точки', routes.filter((r) => routeTitle(r.route) === NEW_POINTS)],
-      ['Ключевые · ССС', routes.filter((r) => r.route >= 100 && r.route < 200)],
-      ['Ключевые · ЛКП', routes.filter((r) => r.route >= 200 && r.route < 300)],
-      ['Точки из базы 2GIS', routes.filter((r) => r.route < 100 && routeTitle(r.route) !== NEW_POINTS)],
-    ].filter((s) => s[1].length).map((s) => `<div class="section-title">${s[0]}</div><div class="list">${s[1].map(routeRow).join('')}</div>`).join('');
+    // Города из ключевых маршрутов: Алматы первым, дальше по числу точек
+    const cityList = (routes) => {
+      const c = { 'Алматы': 1e9 };
+      routes.filter((r) => r.route >= 100).forEach((r) => { const k = routeCity(r); if (k) c[k] = (c[k] || 0) + r.total; });
+      return Object.keys(c).sort((a, b) => c[b] - c[a]);
+    };
+    const filtersHtml = (routes) => {
+      const cities = selCities(), chans = selChannels();
+      const chip = (attr, v, on) => `<button class="chip${on ? ' on' : ''}" ${attr}="${esc(v)}">${esc(v)}</button>`;
+      return `<div class="filters"><div class="f-label">Города</div><div class="f-chips">${cityList(routes).map((c) => chip('data-city', c, cities.indexOf(c) >= 0)).join('')}</div>
+        <div class="f-label">Каналы</div><div class="f-chips">${CHANNELS.map((c) => chip('data-chan', c, chans.indexOf(c) >= 0)).join('')}</div>
+        <a class="btn ghost small" href="#/keymap" style="margin-top:8px">${I.map} Карта ключевых точек</a></div>`;
+    };
+    // Разделы по выбранным городам: ключевые ССС и ЛКП из каверидж; в Алматы ещё новые точки и база 2ГИС
+    const sections = (routes) => {
+      const cities = cityList(routes).filter((c) => selCities().indexOf(c) >= 0);
+      const multi = cities.length > 1;
+      return cities.map((city) => {
+        const key = routes.filter((r) => r.route >= 100 && routeCity(r) === city && routeCounts(r).total > 0).sort(byName);
+        const parts = [];
+        if (city === 'Алматы') parts.push(['Новые точки', routes.filter((r) => routeTitle(r.route) === NEW_POINTS)]);
+        parts.push(['Ключевые · ССС', key.filter((r) => routeLine(r) === 'ССС')], ['Ключевые · ЛКП', key.filter((r) => routeLine(r) !== 'ССС')]);
+        if (city === 'Алматы') parts.push(['Точки из базы 2GIS', routes.filter((r) => r.route < 100 && routeTitle(r.route) !== NEW_POINTS)]);
+        return parts.filter((s) => s[1].length).map((s) => `<div class="section-title">${multi ? esc(city) + ' · ' : ''}${s[0]}</div>
+          <div class="list">${s[1].map(routeRow).join('')}</div>`).join('');
+      }).join('') || '<div class="empty">Выберите город и канал</div>';
+    };
+    const toggle = (key, all, v) => {
+      const cur = store.get(key, all);
+      const next = cur.indexOf(v) >= 0 ? cur.filter((x) => x !== v) : cur.concat([v]);
+      if (next.length) store.set(key, next); // хотя бы один город и один канал остаются выбраны
+    };
     const render = (routes) => {
       $app.innerHTML = `<div class="subtitle">${esc(me.agent.split(' ')[0])} · ${esc(dateLine)}</div>` +
-        goalCard(cache.me['|day']) + akbCard(routes) + tasksRow() +
-        (routes ? sections(routes) + `${closedRow(routes)}<p class="muted" style="text-align:center">Старт: Алматы, Казыбаева 20</p>
+        goalCard(cache.me['|day']) + (selCities().indexOf('Алматы') >= 0 ? akbCard(routes) : '') + tasksRow() +
+        (routes ? filtersHtml(routes) + sections(routes) + `${closedRow(routes)}<p class="muted" style="text-align:center">Старт: Алматы, Казыбаева 20</p>
           <p class="muted" style="text-align:center;font-size:13px">Пока приложение открыто, руководитель видит ваше местоположение на карте команды.</p>` : '<div class="spinner">Загрузка…</div>');
+      $app.querySelectorAll('[data-city]').forEach((b) => { b.onclick = () => { toggle('ui:cities', ['Алматы'], b.dataset.city); render(cache.summary); prefetchedAt = 0; prefetch(); }; });
+      $app.querySelectorAll('[data-chan]').forEach((b) => { b.onclick = () => { toggle('ui:channels', CHANNELS, b.dataset.chan); render(cache.summary); }; });
       if ($('homeDay')) $('homeDay').onclick = async (ev) => {
         ev.target.disabled = true;
         ev.target.textContent = 'Определяем местоположение…';
@@ -1328,19 +1367,45 @@
   const NEW_POINTS = 'Новые точки';
   // В данных «Область» — маршрут 8 (номер 7 занят «Новыми точками»), а показывается он как «Маршрут 7»
   const ROUTE_LABEL = { 8: 7 };
-  const routeTitle = (routeNo) => ((cache.summary || []).find((r) => Number(r.route) === Number(routeNo)) || {}).title || '';
-  // Маршруты КТ (100+ — ССС, 200+ — ЛКП) называются по названию из таблицы: «КТ-2 ССС · АК …»
+  const routeInfo = (routeNo) => (cache.summary || []).find((r) => Number(r.route) === Number(routeNo)) || { route: Number(routeNo) };
+  const routeTitle = (routeNo) => routeInfo(routeNo).title || '';
+  // Ключевые маршруты (от 100) — из каверидж ССС и ЛКП: город, линия, название и АК приходят с сервера
+  const routeCity = (r) => r.city || (r.route < 300 ? 'Алматы' : '');
+  const routeLine = (r) => r.line || (r.route >= 200 && r.route < 300 ? 'ЛКП' : r.route >= 100 && r.route < 200 ? 'ССС' : '');
   const routeName = (routeNo) => {
-    const t = routeTitle(routeNo);
+    const r = routeInfo(routeNo), t = r.title || '';
     if (t === NEW_POINTS) return NEW_POINTS;
-    if (routeNo >= 100) return t ? t.split(' · ')[0] : (routeNo >= 200 ? 'КТ-' + (routeNo - 200) + ' ЛКП' : 'КТ-' + (routeNo - 100) + ' ССС');
+    if (routeNo >= 100) {
+      if (r.name) return r.name + ' ' + routeLine(r);
+      return t ? t.split(' · ')[0] : (routeNo >= 200 ? 'КТ-' + (routeNo - 200) + ' ЛКП' : 'КТ-' + (routeNo - 100) + ' ССС');
+    }
     return 'Маршрут ' + (ROUTE_LABEL[routeNo] || routeNo);
   };
   const routeSub = (routeNo) => {
-    const t = routeTitle(routeNo);
+    const r = routeInfo(routeNo), t = r.title || '';
     if (t === NEW_POINTS) return 'Добавлены агентами с места';
-    return routeNo >= 100 ? t.split(' · ').slice(1).join(' · ') : t;
+    if (routeNo >= 100) return r.name ? [routeCity(r), r.ak ? 'АК ' + r.ak : ''].filter(Boolean).join(' · ') : t.split(' · ').slice(1).join(' · ');
+    return t;
   };
+
+  // Выбор городов и каналов на главной (можно несколько); хранится на телефоне
+  const CHANNELS = ['КТ', 'УНП', 'СКПБ', 'ТС', 'Дилеры'];
+  const selCities = () => store.get('ui:cities', ['Алматы']);
+  const selChannels = () => store.get('ui:channels', CHANNELS);
+  // У ключевых точек приложения канала нет: это розничные магазины, канал КТ
+  const chanOf = (p) => p.channel || 'КТ';
+  const chanOk = (p, routeNo) => routeNo < 100 || selChannels().indexOf(chanOf(p)) >= 0;
+  // Счётчики ключевого маршрута — только по выбранным каналам; у районов и новых точек каналов нет
+  const routeCounts = (r) => {
+    if (r.route < 100 || !r.ch) return r;
+    const o = { total: 0, done: 0, work: 0, free: 0, closed: 0 };
+    selChannels().forEach((c) => { const x = r.ch[c]; if (x) Object.keys(o).forEach((k) => { o[k] += x[k] || 0; }); });
+    return Object.assign({}, r, o);
+  };
+  // Маршруты, видимые при выбранных городах: в Алматы ещё районы и новые точки
+  const visibleRoutes = (routes) => (routes || []).filter((r) => r.route < 100 ? selCities().indexOf('Алматы') >= 0
+    : selCities().indexOf(routeCity(r)) >= 0 && routeCounts(r).total > 0);
+  const byName = (a, b) => routeName(a.route).localeCompare(routeName(b.route), 'ru', { numeric: true });
 
   function listView(routeNo) {
     setBar(routeName(routeNo), '#/', { icon: I.map, href: '#/map/' + routeNo, label: 'Карта маршрута' });
@@ -1360,7 +1425,7 @@
       return `<a class="row-item point${mine ? ' mine' : ''}${p.status === 'закрыта' ? ' closed' : ''}" href="#/p/${p.id}">
         <span class="num">${p.n}</span>
         <span class="grow"><div class="name">${esc(p.name)}</div>
-          <div class="addr">${esc(p.type)}${p.type ? ' · ' : ''}${esc(cleanAddr(p.address))}</div>
+          <div class="addr">${p.channel ? esc(p.channel) + ' · ' : ''}${esc(p.type)}${p.type ? ' · ' : ''}${esc(cleanAddr(p.address))}</div>
           ${p.added ? `<div class="muted" style="font-size:13px">${p.phone ? esc(p.phone) + ' · ' : ''}добавил(а) ${esc(p.added)}</div>` : ''}${badge}</span>
         ${dist}${chev}</a>`;
     };
@@ -1369,7 +1434,7 @@
       if (location.hash !== hash) return;
       const q = ui.q.trim().toLowerCase();
       const match = (p) => !q || (p.name + ' ' + p.address + ' ' + p.type + ' ' + p.n).toLowerCase().includes(q);
-      let list = pts.filter(match);
+      let list = pts.filter(match).filter((p) => chanOk(p, routeNo));
       if (ui.sort === 'near' && ui.pos) {
         list = list.slice().sort((a, b) => (hasCoords(a) ? km(ui.pos, a) : 1e9) - (hasCoords(b) ? km(ui.pos, b) : 1e9));
       }
@@ -1818,6 +1883,8 @@
           <div class="addr">${esc(p.address)}</div>
           ${p.phone ? `<div class="addr">${esc(p.phone)}</div>` : ''}
           ${p.code1c || p.days || p.ak ? `<div class="client-1c">${p.code1c ? `<div><span class="muted">Клиент 1С</span> ${esc(p.code1c)}</div>` : ''}
+            ${p.channel ? `<div><span class="muted">Канал</span> ${esc(p.channel)}</div>` : ''}
+            ${p.route >= 100 && routeCity(routeInfo(p.route)) ? `<div><span class="muted">Город</span> ${esc(routeCity(routeInfo(p.route)))}</div>` : ''}
             ${p.ak ? `<div><span class="muted">АК</span> ${esc(p.ak)}</div>` : ''}
             ${p.days ? `<div><span class="muted">Дни посещения</span> ${esc(p.days)}</div>` : ''}</div>` : ''}
           <div class="quick">${quick}</div>
@@ -3194,8 +3261,45 @@
   }
   const ALMATY = [43.238, 76.889];
 
+  // Все ключевые точки выбранных городов и каналов на одной карте, цвет — по маршруту
+  async function keyMapView() {
+    setBar('Карта ключевых точек', '#/');
+    const hash = location.hash;
+    const routes = visibleRoutes(cache.summary).filter((r) => r.route >= 100).sort(byName);
+    if (!routes.length) { $app.innerHTML = '<div class="empty">Нет ключевых маршрутов для выбранных городов и каналов</div>'; return; }
+    $app.innerHTML = '<div class="spinner" id="kmLoad">Загрузка точек…</div>';
+    const all = [];
+    try {
+      await loadLeaflet();
+      for (let i = 0; i < routes.length; i++) {
+        if (location.hash !== hash) return;
+        if ($('kmLoad')) $('kmLoad').textContent = 'Загрузка точек: маршрут ' + (i + 1) + ' из ' + routes.length + '…';
+        const pts = cachedPoints(routes[i].route) || await loadPoints(routes[i].route);
+        pts.filter((p) => chanOk(p, routes[i].route) && p.route === routes[i].route).forEach((p) => all.push(Object.assign({ ri: i }, p)));
+      }
+    } catch (e) { return showError(e, keyMapView); }
+    if (location.hash !== hash) return;
+    const PALETTE = ['#2a3b7e', '#ff9500', '#34c759', '#af52de', '#ff3b30', '#489ed7', '#8e6c3a', '#e84393', '#00a8a8', '#6c5ce7', '#b8860b', '#2d3436'];
+    const color = (i) => PALETTE[i % PALETTE.length];
+    const shown = all.filter(hasCoords);
+    $app.innerHTML = `
+      <div class="map" id="map"></div>
+      <div class="map-legend">${routes.map((r, i) => `<span><i style="background:${color(i)}"></i>${esc(routeName(r.route))}${selCities().length > 1 ? ' · ' + esc(routeCity(r)) : ''}</span>`).join('')}</div>
+      <div class="muted">На карте ${shown.length} из ${all.length} точек${all.length - shown.length ? ' · без координат: ' + (all.length - shown.length) : ''}</div>
+      <button class="btn ghost small" id="whereMe" style="margin-top:8px">${I.pin} Где я</button>`;
+    const map = newMap();
+    const marks = shown.map((p) => L.circleMarker([p.lat, p.lon], { radius: 7, color: '#fff', weight: 1.5, fillColor: color(p.ri), fillOpacity: 0.95 })
+      .bindPopup(`<b>${esc(p.name)}</b><br>${esc(routeName(p.route))}${p.channel ? ' · ' + esc(p.channel) : ''}<br>${esc(cleanAddr(p.address))}<br><a href="#/p/${p.id}">Открыть точку ›</a>`).addTo(map));
+    if (marks.length) map.fitBounds(L.featureGroup(marks).getBounds().pad(0.1)); else map.setView(ALMATY, 11);
+    $('whereMe').onclick = () => locate(() => {
+      if (!ui.pos) return;
+      L.circleMarker([ui.pos.lat, ui.pos.lon], { radius: 8, color: '#fff', weight: 3, fillColor: '#c0352b', fillOpacity: 1 }).bindTooltip('Я').addTo(map);
+      map.setView([ui.pos.lat, ui.pos.lon], 14);
+    });
+  }
+
   async function mapView(routeNo) {
-    setBar('Карта: маршрут ' + routeNo, '#/r/' + routeNo);
+    setBar('Карта: ' + routeName(routeNo), '#/r/' + routeNo);
     const hash = location.hash;
     $app.innerHTML = '<div class="spinner">Загрузка карты…</div>';
     let pts = cachedPoints(routeNo);
@@ -3204,6 +3308,7 @@
       if (!pts) pts = await loadPoints(routeNo);
     } catch (e) { return showError(e, () => mapView(routeNo)); }
     if (location.hash !== hash) return;
+    pts = pts.filter((p) => chanOk(p, routeNo));
     const colorOf = (p) => isPending(p.id) || p.status === 'выполнена' ? '#1f8a4c'
       : p.status === 'закрыта' ? '#d7281f'
       : p.status === 'в работе' ? (p.agent === me.agent ? '#2a3b7e' : '#f0a24a') : '#489ed7';

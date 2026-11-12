@@ -299,6 +299,14 @@ form fieldset { border: 0; padding: 0; margin: 0; }
 }
 .chips input { position: absolute; opacity: 0; pointer-events: none; }
 .chips label:has(input:checked) { background: var(--accent); color: var(--accent-ink); }
+/* Выбор городов и каналов на главной */
+.filters { margin: 4px 0 6px; }
+.filters .f-label { font-size: 13px; color: var(--muted); margin: 8px 4px 6px; text-transform: uppercase; letter-spacing: .02em; }
+.filters .f-chips { display: flex; gap: 8px; overflow-x: auto; padding: 0 2px 4px; scrollbar-width: none; }
+.filters .f-chips::-webkit-scrollbar { display: none; }
+.filters .chip { flex: 0 0 auto; border: 0; padding: 8px 14px; min-height: 36px; border-radius: 999px; background: var(--chip);
+  color: var(--ink); font-size: 15px; font-weight: 500; touch-action: manipulation; }
+.filters .chip.on { background: var(--accent); color: var(--accent-ink); }
 .req { color: var(--bad); }
 
 /* Нерабочие точки */
