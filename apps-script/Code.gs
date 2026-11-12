@@ -1780,16 +1780,20 @@ function geocodeKeyPoints() {
   const geo = { kz: Maps.newGeocoder().setLanguage('ru').setRegion('kz'), kg: Maps.newGeocoder().setLanguage('ru').setRegion('kg') };
   const centers = {};
   const found = [];
-  let stop = '';
+  let stop = '', done = 0;
   const save = () => {
     if (!found.length) return;
+    // Под блокировкой — только два обращения к листу, чтобы не задерживать агентов
     withLock_(() => {
       const sh = pointsSheet_();
+      const n = sh.getLastRow() - 1;
+      const ids = sh.getRange(2, P.id + 1, n, 1).getValues();
+      const block = sh.getRange(2, P.lat + 1, n, 3).getValues();
       found.splice(0).forEach(f => {
         // Строки только добавляются в конец, но на всякий случай сверяем id
-        if (String(sh.getRange(f.i + 2, P.id + 1).getValue()) !== f.id) return;
-        sh.getRange(f.i + 2, P.lat + 1, 1, 3).setValues([[f.lat, f.lon, f.acc]]);
+        if (f.i < n && String(ids[f.i][0]) === f.id) block[f.i] = [f.lat, f.lon, f.acc];
       });
+      sh.getRange(2, P.lat + 1, n, 3).setValues(block);
     });
   };
   for (const i of todo) {
@@ -1798,36 +1802,57 @@ function geocodeKeyPoints() {
     const city = (meta[Number(r[P.route])] || {}).city || KEY_CITY;
     const kg = city === 'Бишкек', country = kg ? 'Кыргызстан' : 'Казахстан';
     const g = kg ? geo.kg : geo.kz;
+    const addr = String(r[P.address]).trim();
+    const a = addrParts_(addr, city);
+    // В адресе только город — искать нечего: точка без отметки, а не в центре города
+    if (!a.house && !a.street.length) { found.push({ i, id: String(r[P.id]), lat: '', lon: '', acc: 'не найден' }); continue; }
     let res = null;
     try {
       if (!(city in centers)) { Utilities.sleep(1100); const c = g.geocode(city + ', ' + country); centers[city] = c.status === 'OK' && c.results[0] ? c.results[0].geometry.location : null; }
       Utilities.sleep(1100);
-      const a = g.geocode(String(r[P.address]) + (String(r[P.address]).indexOf(city) < 0 ? ', ' + city : '') + ', ' + country);
-      const b = a.status === 'OK' && a.results[0];
+      const gr = g.geocode(addr + (addr.indexOf(city) < 0 ? ', ' + city : '') + ', ' + country);
       const cen = centers[city];
-      // Адрес дальше 60 км от своего города — скорее всего ошибка геокодера
-      if (b && (!cen || meters_(b.geometry.location.lat, b.geometry.location.lng, cen.lat, cen.lng) < 60000)) {
-        const precise = ['ROOFTOP', 'RANGE_INTERPOLATED'].indexOf(b.geometry.location_type) >= 0 && !b.partial_match;
-        res = { lat: b.geometry.location.lat, lon: b.geometry.location.lng, acc: precise ? 'точно' : 'примерно' };
-      }
+      (gr.results || []).slice(0, 3).forEach(b => {
+        const loc = b.geometry.location;
+        // Адрес дальше 60 км от своего города — ошибка геокодера
+        if (res && res.acc === 'точно' || cen && meters_(loc.lat, loc.lng, cen.lat, cen.lng) > 60000) return;
+        const comp = (t) => (b.address_components.find(c => c.types.indexOf(t) >= 0) || {}).long_name || '';
+        const num = normAddr_(comp('street_number')), route = normAddr_(comp('route'));
+        const streetOk = !a.street.length || a.street.some(w => route.indexOf(w.slice(0, Math.max(4, w.length - 2))) >= 0);
+        // Дом — только если совпали номер и улица; иначе центр улицы «примерно»; центр города не годится
+        if (a.house && num === a.house && streetOk) res = { lat: loc.lat, lon: loc.lng, acc: 'точно' };
+        else if (!res && route && streetOk && b.types.indexOf('locality') < 0) res = { lat: loc.lat, lon: loc.lng, acc: 'примерно' };
+      });
     } catch (e) {
       const msg = String(e.message);
       if (/день|day/i.test(msg)) { stop = msg; break; }
       continue; // частые запросы — попробуем эту точку в следующий раз
     }
     found.push(Object.assign({ i, id: String(r[P.id]) }, res || { lat: '', lon: '', acc: 'не найден' }));
+    done++;
     if (found.length >= 20) save();
   }
   save();
   const left = allPoints_().values.filter(r => Number(r[P.route]) >= KEY_ROUTE_MIN && r[P.lat] === '' && r[P.acc] !== 'не найден').length;
-  log_('Система', 'координаты ключевых точек', '', 'Осталось без координат: ' + left + (stop ? ' (лимит Google на сегодня)' : ''));
-  Logger.log('Осталось без координат: ' + left + (stop ? ' | ' + stop : ''));
+  // Запуск каждый час: в журнал — только когда что-то сделано, чтобы не засорять его
+  if (done) log_('Система', 'координаты ключевых точек', '', 'Проверено ' + done + ', осталось без координат: ' + left + (stop ? ' (лимит Google на сегодня)' : ''));
+  Logger.log('Проверено ' + done + ', осталось без координат: ' + left + (stop ? ' | ' + stop : ''));
 }
 
-/** Один раз из редактора: ежедневный запуск geocodeKeyPoints в 10:00 по Алматы (лимит Google к этому времени обновляется). */
+const normAddr_ = (s) => String(s || '').toLowerCase().replace(/ё/g, 'е').replace(/[^a-zа-я0-9әғқңөұүһі\/]+/g, ' ').trim();
+/** Улица (значимые слова) и дом из адреса вида «Гагарина, 56/3, Шымкент» или «Шымкент Гагарина 56/3». */
+function addrParts_(addr, city) {
+  const t = String(addr).replace(new RegExp(city, 'gi'), ' ').replace(/г\.|ул\.|улица|проспект|пр\.|мкр\.?|микрорайон|Казахстан|Кыргызстан/gi, ' ')
+    .split(/[\s,]+/).filter(Boolean);
+  let h = -1;
+  t.forEach((w, k) => { if (/^\d+[а-яa-z]?(\/\d+[а-яa-z]?)?$/i.test(w)) h = k; });
+  return { house: h >= 0 ? normAddr_(t[h]) : '', street: (h >= 0 ? t.slice(0, h) : t).map(normAddr_).filter(w => w.length > 3 && !/^\d+$/.test(w)) };
+}
+
+/** Один раз из редактора: запуск geocodeKeyPoints каждый час — за запуск около 230 адресов, пока хватает дневного лимита Google. */
 function geocodeKeySetup() {
   ScriptApp.getProjectTriggers().filter(t => t.getHandlerFunction() === 'geocodeKeyPoints').forEach(t => ScriptApp.deleteTrigger(t));
-  ScriptApp.newTrigger('geocodeKeyPoints').timeBased().everyDays(1).atHour(10).nearMinute(0).inTimezone(TZ).create();
+  ScriptApp.newTrigger('geocodeKeyPoints').timeBased().everyHours(1).create();
   Logger.log('Триггер координат создан: ' + ScriptApp.getProjectTriggers().filter(t => t.getHandlerFunction() === 'geocodeKeyPoints').length);
 }
 

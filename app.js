@@ -124,11 +124,21 @@
   }
 
   /* ---------- 2ГИС ---------- */
-  const hasCoords = (p) => p.lat != null && p.lon != null && p.acc !== 'нет';
-  // Кнопка «2ГИС»: карточка фирмы; точка, добавленная агентом с места, — по её координатам; иначе поиск по названию и адресу
-  const gisUrl = (p) => p.gis
-    || (p.added && hasCoords(p) ? 'https://2gis.kz/geo/' + p.lon + ',' + p.lat : '')
-    || ('https://2gis.kz/almaty/search/' + encodeURIComponent(p.name + ', ' + cleanAddr(p.address)));
+  const hasCoords = (p) => p.lat != null && p.lon != null && p.acc !== 'нет' && p.acc !== 'не найден';
+  // Адрес города в 2ГИС (Талдыкорган и область — на карте Алматы, Бишкек — на 2gis.kg)
+  const GIS_CITY = { 'Алматы': 'kz/almaty', 'Талдыкорган': 'kz/almaty', 'Астана': 'kz/astana', 'Шымкент': 'kz/shymkent', 'Караганда': 'kz/karaganda',
+    'Актобе': 'kz/aktobe', 'Тараз': 'kz/taraz', 'Павлодар': 'kz/pavlodar', 'Усть-Каменогорск': 'kz/ust-kamenogorsk', 'Семей': 'kz/semey',
+    'Атырау': 'kz/atyrau', 'Костанай': 'kz/kostanay', 'Кызылорда': 'kz/kyzylorda', 'Уральск': 'kz/uralsk', 'Петропавловск': 'kz/petropavlovsk',
+    'Актау': 'kz/aktau', 'Кокшетау': 'kz/kokshetau', 'Бишкек': 'kg/bishkek' };
+  // Кнопка «2ГИС»: карточка фирмы; клиент 1С с точными координатами и точка, добавленная агентом, — ровно по отметке на карте;
+  // иначе поиск по названию и адресу в городе точки (раньше искалось всегда в Алматы)
+  const gisUrl = (p) => {
+    if (p.gis) return p.gis;
+    const city = p.route >= 100 ? routeCity(routeInfo(p.route)) || 'Алматы' : 'Алматы';
+    const [domain, slug] = (GIS_CITY[city] || 'kz/almaty').split('/');
+    if (hasCoords(p) && (p.added || (p.origin >= 100 && p.acc === 'точно'))) return 'https://2gis.' + domain + '/geo/' + p.lon + ',' + p.lat;
+    return 'https://2gis.' + domain + '/' + slug + '/search/' + encodeURIComponent(p.name + ', ' + cleanAddr(p.address));
+  };
 
   /* ---------- Задания: общие функции ---------- */
   const isOpen = (t) => t.status === 'новое' || t.status === 'в работе';
