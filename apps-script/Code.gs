@@ -1636,7 +1636,7 @@ function reportSheet_(ss, title, columns, rows, opts) {
     range.setValues(rows).setWrap(true).setVerticalAlignment('top');
     sh.getRange(top, 1, rows.length + 1, n).createFilter();
   } else {
-    sh.getRange(top + 1, 1).setValue('За этот день нет данных').setFontColor('#777777');
+    sh.getRange(top + 1, 1).setValue(o.empty || 'За этот день нет данных').setFontColor('#777777');
   }
   sh.setFrozenRows(top);
   return sh;
@@ -1760,6 +1760,142 @@ function reportSetup() {
   ScriptApp.getProjectTriggers().filter(t => t.getHandlerFunction() === 'sendDailyReport').forEach(t => ScriptApp.deleteTrigger(t));
   ScriptApp.newTrigger('sendDailyReport').timeBased().everyDays(1).atHour(REPORT_HOUR).nearMinute(0).inTimezone(TZ).create();
   Logger.log('Триггер создан: ' + ScriptApp.getProjectTriggers().filter(t => t.getHandlerFunction() === 'sendDailyReport').length);
+}
+
+/* ---------------- Отчёт за период (неделю) ----------------
+ * Собирается из отчётов за каждый день периода. Excel: итог по сотрудникам, по дням, все визиты со всеми
+ * комментариями и заполненной анкетой, нерабочие точки, новые адреса, задания. */
+function periodDays_(from, to) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to)) fail_('Неверная дата');
+  const days = [];
+  for (let t = Utilities.parseDate(from + ' 12:00', TZ, 'yyyy-MM-dd HH:mm').getTime(), end = Utilities.parseDate(to + ' 12:00', TZ, 'yyyy-MM-dd HH:mm').getTime();
+    t <= end && days.length < 62; t += 86400000) days.push(Utilities.formatDate(new Date(t), TZ, 'yyyy-MM-dd'));
+  return days;
+}
+
+function buildPeriodBlob_(from, to) {
+  const days = periodDays_(from, to);
+  const reps = days.map(dayReport_);
+  const label = Utilities.formatDate(Utilities.parseDate(from, TZ, 'yyyy-MM-dd'), TZ, 'dd.MM') + '–' +
+    Utilities.formatDate(Utilities.parseDate(to, TZ, 'yyyy-MM-dd'), TZ, 'dd.MM.yyyy');
+  const dm = (d) => d.slice(8, 10) + '.' + d.slice(5, 7);
+  // Состояние точки сейчас: работает или отмечена нерабочей
+  const now = {};
+  allPoints_().values.forEach(r => { now[String(r[P.id])] = r; });
+  const pointState = (id) => {
+    const r = now[id];
+    if (!r) return '';
+    return r[P.status] === ST_CLOSED ? 'Не работает: ' + r[P.closedReason] + (r[P.closedNote] ? ' (' + r[P.closedNote] + ')' : '') : 'Работает';
+  };
+  const routeLabel = (id) => {
+    const r = now[id];
+    if (!r) return '';
+    const rt = effRoute_(r), m = routeMeta_()[rt];
+    return m ? m.name + ' ' + m.line + ' · ' + m.city : (rt === 7 ? 'Новые точки' : 'Маршрут ' + (rt === 8 ? 7 : rt));
+  };
+
+  // Итог по сотрудникам за период
+  const by = {};
+  const ag = (name, role) => by[nameKey_(name)] || (by[nameKey_(name)] = { name, role, days: 0, visits: 0, newPoints: 0, repeat: 0, high: 0, mid: 0,
+    work: 0, notWork: 0, closed: 0, added: 0, issued: 0, done: 0, far: 0, noGps: 0, perDay: {} });
+  reps.forEach(rep => rep.agents.forEach(a => {
+    const s = ag(a.name, a.role);
+    if (a.visits) s.days++;
+    ['visits', 'newPoints', 'repeat', 'closed', 'added', 'issued', 'done', 'far', 'noGps'].forEach(k => { s[k] += a[k] || 0; });
+    s.perDay[rep.date] = a.visits;
+    a.items.forEach(i => {
+      if (i.interest === 'Высокий') s.high++; else if (i.interest === 'Средний') s.mid++;
+      if (/^Работаем/i.test(i.alina)) s.work++; else if (/^Не работаем/i.test(i.alina)) s.notWork++;
+    });
+  }));
+  const people = Object.keys(by).map(k => by[k]).filter(a => a.visits || a.closed || a.added || a.role !== ROLE_MANAGER)
+    .sort((a, b) => b.visits - a.visits || a.name.localeCompare(b.name));
+  const tot = (k) => people.reduce((s, a) => s + a[k], 0);
+  const closedAll = [].concat.apply([], reps.map(r => r.closed.map(c => Object.assign({ date: r.date }, c))));
+  const addedAll = [].concat.apply([], reps.map(r => r.added.map(c => Object.assign({ date: r.date }, c))));
+  const tasksAll = [];
+  const seenTask = {};
+  reps.forEach(r => r.tasks.forEach(t => { if (!seenTask[t.id]) { seenTask[t.id] = 1; tasksAll.push(Object.assign({ date: r.date }, t)); } }));
+  const visitsAll = [];
+  reps.forEach(r => r.agents.forEach(a => a.items.forEach(i => visitsAll.push(Object.assign({ date: r.date, agent: a.name }, i)))));
+  visitsAll.sort((a, b) => a.t - b.t);
+  const totals = { visits: tot('visits'), newPoints: tot('newPoints'), repeat: tot('repeat'), high: tot('high'), mid: tot('mid'),
+    work: tot('work'), notWork: tot('notWork'), closed: closedAll.length, added: addedAll.length, tasks: tasksAll.length };
+
+  const ss = SpreadsheetApp.create('Отчёт МТ ' + label);
+  const fileId = ss.getId();
+  try {
+    ss.setSpreadsheetTimeZone(TZ);
+    const first = ss.getSheets()[0];
+    first.getRange(1, 1, 3, 1).setValues([['Отчёт МТ за ' + label],
+      ['Визитов: ' + totals.visits + ' (новых точек ' + totals.newPoints + ', повторных ' + totals.repeat + ') · высокий интерес: ' + totals.high +
+        ' · средний: ' + totals.mid + ' · работаем: ' + totals.work + ' · не работаем: ' + totals.notWork],
+      ['Отмечено нерабочих точек: ' + totals.closed + ' · новых адресов: ' + totals.added + ' · заданий: ' + totals.tasks]]);
+    first.getRange(1, 1).setFontWeight('bold').setFontSize(14);
+    const rs = (title, cols, rows, opts) => reportSheet_(ss, title, cols, rows, Object.assign({ empty: 'За этот период нет данных' }, opts));
+    rs('Итог', [['Сотрудник', 200], ['Дней с визитами', 80, 'n'], ['Визитов', 70, 'n'], ['Новые точки', 70, 'n'], ['Повторные', 75, 'n'],
+      ['Высокий интерес', 80, 'n'], ['Средний интерес', 80, 'n'], ['Работаем', 75, 'n'], ['Не работаем', 80, 'n'], ['Нерабочие отмечены', 85, 'n'],
+      ['Новые адреса', 75, 'n'], ['Заданий выдал', 75, 'n'], ['Заданий выполнил', 85, 'n'], ['Далеко от точки', 75, 'n'], ['Без GPS', 65, 'n']],
+      people.map(a => [a.name, a.days, a.visits, a.newPoints, a.repeat, a.high, a.mid, a.work, a.notWork, a.closed, a.added, a.issued, a.done, a.far, a.noGps])
+        .concat(people.length ? [['Итого', '', totals.visits, totals.newPoints, totals.repeat, totals.high, totals.mid, totals.work, totals.notWork,
+          totals.closed, totals.added, tot('issued'), tot('done'), tot('far'), tot('noGps')]] : []), { sheet: first, top: 5 });
+    if (people.length) first.getRange(5 + people.length + 1, 1, 1, 15).setFontWeight('bold').setBackground('#eef1f8');
+
+    rs('По дням', [['Сотрудник', 200]].concat(days.map(d => [dm(d), 60, 'n'])).concat([['Всего', 70, 'n']]),
+      people.map(a => [a.name].concat(days.map(d => a.perDay[d] || 0)).concat([a.visits])));
+
+    const sectionsText = (i) => (i.sections || []).filter(s => s.title !== 'Итог' && s.title !== 'Контакты')
+      .map(s => s.title + ': ' + s.fields.map(f => f[0] + ' — ' + f[1]).join('; ')).join('\n');
+    const vRows = visitsAll.map(i => [dm(i.date), i.time, i.agent, routeLabel(i.id), i.name, i.type, i.address, pointState(i.id), i.alina, i.interest,
+      i.nextStep, i.nextDate, i.comment, i.contact, i.position, i.phone, i.whatsapp, i.assortment, i.ourBrands, i.competitors,
+      i.visit > 1 ? 'повторный (' + i.visit + ')' : 'первый', [i.far ? i.distance + ' м от точки' : '', i.gps ? '' : 'без GPS'].filter(Boolean).join(', '),
+      sectionsText(i), i.photos.length ? '=HYPERLINK("' + i.photos[0] + '","Фото (' + i.photos.length + ')")' : '']);
+    const vs = rs('Визиты', [['Дата', 50], ['Время', 50], ['Сотрудник', 160], ['Маршрут', 150], ['Точка', 190], ['Тип', 150], ['Адрес', 230],
+      ['Точка работает?', 130], ['Работаем с Alina?', 110], ['Интерес', 75], ['Итог / следующий шаг', 240], ['Дата след. шага', 85], ['Комментарий', 260],
+      ['Контакт', 130], ['Должность', 110], ['Телефон', 120], ['WhatsApp', 120], ['Ассортимент', 200], ['Наши бренды', 160], ['Конкуренты', 160],
+      ['Визит', 90], ['Замечание', 130], ['Анкета полностью', 420], ['Фото', 70, 'f']], vRows);
+    if (visitsAll.length) {
+      vs.getRange(2, 8, visitsAll.length, 1).setBackgrounds(visitsAll.map(i => [/^Не работает/.test(pointState(i.id)) ? CLOSED_COLOR : null]));
+      vs.getRange(2, 10, visitsAll.length, 1).setBackgrounds(visitsAll.map(i => [i.interest === 'Высокий' ? '#d6f2df' : null]));
+    }
+
+    const cs = rs('Нерабочие точки', [['Дата', 50], ['Время', 50], ['Кто отметил', 160], ['Маршрут', 150], ['Точка', 190], ['Адрес', 240],
+      ['Причина', 150], ['Комментарий', 260]], closedAll.map(c => [dm(c.date), c.time, c.by, routeLabel(c.id), c.name, c.address, c.reason, c.note]));
+    if (closedAll.length) cs.getRange(2, 1, closedAll.length, 8).setBackground(CLOSED_COLOR);
+    rs('Новые адреса', [['Дата', 50], ['Время', 50], ['Кто добавил', 160], ['Точка', 190], ['Тип', 150], ['Адрес', 240], ['Телефон', 120], ['Статус', 100]],
+      addedAll.map(c => [dm(c.date), c.time, c.by, c.name, c.type, c.address, c.phone, c.status]));
+    rs('Задания', [['Дата', 50], ['Точка', 190], ['Адрес', 220], ['Задание', 200], ['Комментарий', 220], ['Срок', 80], ['Выдал', 150],
+      ['Исполнитель', 150], ['Статус', 90], ['Результат', 240]],
+      tasksAll.map(t => [dm(t.date), t.name, t.address, t.type, t.comment, t.due, t.author, t.assignee, t.status, t.result]));
+
+    SpreadsheetApp.flush();
+    const res = UrlFetchApp.fetch('https://docs.google.com/spreadsheets/d/' + fileId + '/export?format=xlsx',
+      { headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() }, muteHttpExceptions: true });
+    if (res.getResponseCode() !== 200) throw new Error('Не удалось собрать Excel (код ' + res.getResponseCode() + ')');
+    return { label, totals, people, blob: res.getBlob().setName('Отчёт МТ ' + label + '.xlsx') };
+  } finally {
+    try { DriveApp.getFileById(fileId).setTrashed(true); } catch (e) {}
+  }
+}
+
+/** Письмо с отчётами за периоды: [['2026-11-02','2026-11-06'], …]. Каждый период — отдельный Excel во вложении. */
+function mailPeriodReports_(periods, to, subject) {
+  const h = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const built = periods.map(p => buildPeriodBlob_(p[0], p[1]));
+  const line = (b) => 'Визитов ' + b.totals.visits + ' (новых точек ' + b.totals.newPoints + ', повторных ' + b.totals.repeat + '), высокий интерес ' +
+    b.totals.high + ', средний ' + b.totals.mid + ', работаем ' + b.totals.work + ', не работаем ' + b.totals.notWork +
+    ', нерабочих точек ' + b.totals.closed + ', новых адресов ' + b.totals.added;
+  const body = built.map(b => 'Отчёт МТ за ' + b.label + '\n' + line(b) + '\n' + b.people.filter(a => a.visits).map(a => '· ' + a.name + ' — ' + a.visits).join('\n')).join('\n\n') +
+    '\n\nВо вложении Excel за каждый период: итог по сотрудникам, по дням, все визиты с комментариями и анкетой, нерабочие точки, новые адреса, задания.';
+  const htmlBody = '<div style="font:15px/1.5 -apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#1d1d1f;max-width:600px">' + built.map(b =>
+    '<h2 style="margin:16px 0 4px;font-size:19px">Отчёт МТ за ' + h(b.label) + '</h2><p style="margin:0 0 8px;color:#555">' + h(line(b)) + '</p>' +
+    '<table style="border-collapse:collapse;width:100%">' + b.people.filter(a => a.visits).map(a =>
+      '<tr><td style="padding:5px 0;border-top:1px solid #e5e5ea">' + h(a.name) + '</td><td style="padding:5px 0;border-top:1px solid #e5e5ea;text-align:right"><b>' +
+      a.visits + '</b> · дней ' + a.days + '</td></tr>').join('') + '</table>').join('') +
+    '<p style="margin:16px 0 0;color:#666;font-size:13px">Во вложении Excel за каждый период: итог по сотрудникам, по дням, все визиты с комментариями и полной анкетой, ' +
+    'какая точка работает и какая нет, нерабочие точки, новые адреса, задания.</p></div>';
+  MailApp.sendEmail({ to, subject, body, htmlBody, name: 'Alina Sales', attachments: built.map(b => b.blob) });
+  return built.map(b => ({ label: b.label, totals: b.totals, size: b.blob.getBytes().length }));
 }
 
 /* ---------------- Координаты ключевых точек ----------------
